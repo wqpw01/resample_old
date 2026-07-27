@@ -1,0 +1,58 @@
+case_id: case_2
+ct_path: ../case_data/ct/ct_venous.nrrd
+output_root: /root/autodl-tmp/ct_vascular_resampling_case2/output
+registration_module_path: ../registration/2021.py
+organ_models:
+  spleen: ../case_data/models/spleen.ply
+  kidney_right: ../case_data/models/kidney_right.ply
+  kidney_left: ../case_data/models/kidney_left.ply
+  gallbladder: ../case_data/models/gallbladder.ply
+  esophagus: ../case_data/models/esophagus.ply
+  liver: ../case_data/models/liver.ply
+  stomach: ../case_data/models/stomach.ply
+  aorta: ../case_data/models/aorta.ply
+  inferior_vena_cava: ../case_data/models/inferior_vena_cava.ply
+  pancreas: ../case_data/models/pancreas.ply
+  adrenal_gland_right: ../case_data/models/adrenal_gland_right.ply
+  adrenal_gland_left: ../case_data/models/adrenal_gland_left.ply
+  duodenum: ../case_data/models/duodenum.ply
+  portal_vein_and_splenic_vein: ../case_data/models/portal_vein_and_splenic_vein.ply
+vessel_models:
+  - id: artery_tree
+    path: ../case_data/models/artery_tree.ply
+    label: artery
+    color: [255, 82, 0]
+  - id: vein_tree
+    path: ../case_data/models/vein_tree.ply
+    label: vein
+    color: [0, 188, 212]
+sampling:
+  point_counts:
+    stomach: 1000
+    liver: 500
+    pancreas: 500
+    duodenum_part1: 500
+    duodenum_part2: 500
+    esophagus: 200
+  stomach_search_distance_mm: 10.0
+  stomach_voxel_pitch_mm: 1.0
+square:
+  side_length_mm: 100.0
+  deduplicate_degenerate_edge_angles: true
+ct:
+  output_resolution: 300
+  window_level: 40.0
+  window_width: 400.0
+  fill_hu_value: -1000.0
+filtering:
+  black_threshold: 50
+  black_ratio_limit: 0.3
+  line_min_diagonal_fraction: 0.7
+  black_side_min_ratio: 0.9
+  valid_side_max_black_ratio: 0.1
+runtime:
+  seed: 0
+  workers: 32
+  backend: auto
+  gpu_device: 0
+  gpu_batch_size: 32

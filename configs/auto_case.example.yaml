@@ -1,0 +1,21 @@
+# 自动病例入口：病例影像输入只有 CT 与一份三类血管标签图。
+case_id: case_001
+ct_path: ../data/case_001/ct.nrrd
+vascular_segmentation_path: ../data/case_001/vessels.nrrd
+
+# 每个病例必须显式给出数值标签；portal 会自动并入 vein。
+vessel_label_values:
+  artery: [1]
+  vein: [2]
+  portal: [3]
+
+# 既有检索引擎代码依赖，不属于病例影像输入。
+registration_module_path: ../registration/2021.py
+output_root: ../output
+
+# 当 ct_path 为含多个序列的 DICOM 目录时必须填写。
+dicom_series_uid: null
+
+totalsegmentator:
+  executable: TotalSegmentator
+  device: gpu:0

@@ -1,0 +1,14 @@
+# 对既有 rejected 图库做 CT FOV 归因，不会改写原 rejected.jsonl 或 PNG。
+ct_path: "../data/case_001/dicom"
+# 多序列 DICOM 目录必须指定 Series UID；NRRD/NIfTI 时删除本行。
+dicom_series_uid: "1.2.840.x.x"
+rejected_jsonl: "../output/case_001/rejected/rejected.jsonl"
+output_directory: "../output/case_001/rejected/diagnostics"
+representative_limit_per_cause: 30
+
+filtering:
+  black_threshold: 50
+  black_ratio_limit: 0.50
+  line_min_diagonal_fraction: 0.60
+  black_side_min_ratio: 0.90
+  valid_side_max_black_ratio: 0.10

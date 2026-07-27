@@ -1,0 +1,63 @@
+case_id: "case_001"
+ct_path: "../data/case_001/ct.nrrd"
+# ct_path 为包含多序列 DICOM 的目录时必须填写实际目标 Series UID。
+# dicom_series_uid: "1.2.840.x.x"
+output_root: "../output"
+registration_module_path: "/mnt/c/Users/zhangyutang/Desktop/CT-EUS定位项目/2021.py"
+
+organ_models:
+  adrenal_gland_left: "../data/case_001/models/adrenal_gland_left.obj"
+  adrenal_gland_right: "../data/case_001/models/adrenal_gland_right.obj"
+  aorta: "../data/case_001/models/aorta.obj"
+  duodenum: "../data/case_001/models/duodenum.obj"
+  esophagus: "../data/case_001/models/esophagus.obj"
+  gallbladder: "../data/case_001/models/gallbladder.obj"
+  inferior_vena_cava: "../data/case_001/models/inferior_vena_cava.obj"
+  kidney_left: "../data/case_001/models/kidney_left.obj"
+  kidney_right: "../data/case_001/models/kidney_right.obj"
+  liver: "../data/case_001/models/liver.obj"
+  pancreas: "../data/case_001/models/pancreas.obj"
+  portal_vein_and_splenic_vein: "../data/case_001/models/portal_vein_and_splenic_vein.obj"
+  spleen: "../data/case_001/models/spleen.obj"
+  stomach: "../data/case_001/models/stomach.obj"
+
+vessel_models:
+  - id: "portal_tree"
+    path: "../data/case_001/models/portal_vein_and_splenic_vein.obj"
+    label: "portal"
+    color: [255, 0, 255]
+  - id: "hepatic_tree"
+    path: "../data/case_001/models/hepatic_vein.obj"
+    label: "hepatic"
+    color: [0, 188, 212]
+
+sampling:
+  point_counts:
+    stomach: 1000
+    liver: 500
+    pancreas: 500
+    duodenum_part1: 500
+    duodenum_part2: 500
+    esophagus: 200
+  stomach_search_distance_mm: 10.0
+  stomach_voxel_pitch_mm: 1.0
+
+square:
+  side_length_mm: 100.0
+
+ct:
+  output_resolution: 300
+  window_level: 40.0
+  window_width: 400.0
+  fill_hu_value: -1000.0
+
+filtering:
+  black_threshold: 50
+  black_ratio_limit: 0.30
+  line_min_diagonal_fraction: 0.70
+  black_side_min_ratio: 0.90
+  valid_side_max_black_ratio: 0.10
+
+runtime:
+  seed: 0
+  workers: 8
