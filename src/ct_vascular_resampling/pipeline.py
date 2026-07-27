@@ -15,7 +15,14 @@ import trimesh
 
 from .artifacts import write_square_samples_ply, write_surface_samples_ply
 from .config import CTConfig, CaseConfig, FilterConfig
-from .ct_resampling import CTVolume, hu_to_grayscale, load_ct, sample_ct_square
+from .ct_resampling import (
+    CTVolume,
+    diagnose_square_fov,
+    hu_to_grayscale,
+    load_ct,
+    sample_ct_square,
+    square_vertices_inside_ct,
+)
 from .fov_diagnostics import assess_rejected_fov
 from .gallery import GalleryWriter, write_rectangles_ply
 from .geometry import frame_from_vertices, intersect_mesh_with_square
@@ -44,6 +51,33 @@ class RunSummary:
     indexed_feature_count: int = 0
 
 
+def _exclude_fov_sample_if_needed(
+    sample: SquareSample,
+    volume: CTVolume,
+    ct_settings: CTConfig,
+    writer: GalleryWriter,
+) -> str | None:
+    """在 CT 插值前把任一顶点超出 FOV 的方形写入独立清单。"""
+
+    if square_vertices_inside_ct(volume, sample.vertices):
+        return None
+    frame = frame_from_vertices(sample.vertices)
+    diagnosis = diagnose_square_fov(
+        volume,
+        frame.vertices,
+        ct_settings.output_resolution,
+        probe_point_world=sample.probe_point_world,
+    )
+    return writer.write_fov_exclusion(
+        sample_id=sample.sample_id,
+        organ=sample.organ,
+        probe_point_world=sample.probe_point_world,
+        input_normal_world=sample.input_normal_world,
+        frame=frame,
+        fov_diagnostics=diagnosis.to_record(),
+    )
+
+
 def render_square_sample(
     sample: SquareSample,
     volume: CTVolume,
@@ -57,6 +91,9 @@ def render_square_sample(
     completed = writer.completed_status(sample.sample_id)
     if completed is not None:
         return completed
+    excluded_status = _exclude_fov_sample_if_needed(sample, volume, ct_settings, writer)
+    if excluded_status is not None:
+        return excluded_status
     frame = frame_from_vertices(sample.vertices)
     hu = sample_ct_square(volume, frame.vertices, ct_settings.output_resolution, ct_settings.fill_hu_value)
     return render_precomputed_square(sample, hu, vessels, ct_settings, filter_settings, writer, volume=volume)
@@ -78,6 +115,10 @@ def render_precomputed_square(
     completed = writer.completed_status(sample.sample_id)
     if completed is not None:
         return completed
+    if volume is not None:
+        excluded_status = _exclude_fov_sample_if_needed(sample, volume, ct_settings, writer)
+        if excluded_status is not None:
+            return excluded_status
     frame = frame_from_vertices(sample.vertices)
     ct_pixels = hu_to_grayscale(hu, ct_settings.window_level, ct_settings.window_width)
     quality = evaluate_ct_quality(ct_pixels, filter_settings)
@@ -180,11 +221,22 @@ def run_case(
         write_rectangles_ply(case_directory / "rectangles.ply", [frame_from_vertices(sample.vertices) for sample in samples])
     if "render" in selected:
         volume = load_ct(config.ct_path, dicom_series_uid=config.dicom_series_uid)
+        writer = GalleryWriter(case_directory, config.case_id)
+        pending_samples: list[SquareSample] = []
+        for sample in samples:
+            completed = writer.completed_status(sample.sample_id)
+            if completed is not None:
+                statuses[completed] += 1
+                continue
+            excluded_status = _exclude_fov_sample_if_needed(sample, volume, config.ct, writer)
+            if excluded_status is not None:
+                statuses[excluded_status] += 1
+                continue
+            pending_samples.append(sample)
         vessels = [
             PreparedVessel(vessel.identifier, vessel.label, vessel.color, load_surface_mesh(vessel.path).mesh)
             for vessel in config.vessel_models
         ]
-        writer = GalleryWriter(case_directory, config.case_id)
         effective_workers = workers if workers is not None else config.runtime.workers
         if effective_workers < 1:
             raise ValueError("workers 必须大于零")
@@ -198,17 +250,18 @@ def run_case(
             {
                 "case_id": config.case_id,
                 "total_squares": len(samples),
+                "excluded_fov_count": statuses["excluded_fov"],
                 "deduplicate_degenerate_edge_angles": config.square.deduplicate_degenerate_edge_angles,
                 "calibration": None,
             }
         )
-        if backend.name != "cpu" and samples:
+        if backend.name != "cpu" and pending_samples:
             reference_backend = CachedCpuBackend(volume)
             try:
                 calibration = validate_backend_against_cpu(
                     backend,
                     reference_backend,
-                    np.asarray([sample.vertices for sample in samples[:64]], dtype=np.float64),
+                    np.asarray([sample.vertices for sample in pending_samples[:64]], dtype=np.float64),
                     resolution=config.ct.output_resolution,
                     fill_hu_value=config.ct.fill_hu_value,
                     window_level=config.ct.window_level,
@@ -229,14 +282,6 @@ def run_case(
                 backend_metadata["fallback_reason"] = message
             else:
                 reference_backend.close()
-        pending_samples: list[SquareSample] = []
-        for sample in samples:
-            completed = writer.completed_status(sample.sample_id)
-            if completed is None:
-                pending_samples.append(sample)
-            else:
-                statuses[completed] += 1
-
         def render_one(item: tuple[SquareSample, np.ndarray, str]) -> str:
             sample, hu, backend_name = item
             return render_precomputed_square(

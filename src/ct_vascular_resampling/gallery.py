@@ -39,7 +39,7 @@ def write_rectangles_ply(path: str | Path, frames: Iterable[SquareFrame]) -> Non
 
 
 class GalleryWriter:
-    """将所有样本稳定写入 gallery、unindexed 或 rejected。"""
+    """将样本稳定写入 gallery、unindexed、rejected 或 FOV 排除清单。"""
 
     def __init__(self, case_directory: str | Path, case_id: str):
         self.case_directory = Path(case_directory)
@@ -114,6 +114,45 @@ class GalleryWriter:
                 resampling_backend,
                 fov_diagnostics,
             )
+
+    def write_fov_exclusion(
+        self,
+        sample_id: str,
+        organ: str,
+        probe_point_world: np.ndarray,
+        input_normal_world: np.ndarray,
+        frame: SquareFrame,
+        fov_diagnostics: dict[str, object],
+    ) -> str:
+        """记录 CT FOV 外的方形，不生成 CT 或血管 PNG。"""
+
+        with self._lock:
+            if sample_id in self.completed_statuses:
+                return self.completed_statuses[sample_id]
+            record = {
+                "frame_id": self.case_id,
+                "slice_id": sample_id,
+                "status": "excluded_fov",
+                "organ": organ,
+                "source": "organ_surface",
+                "probe_point_world": _vector(probe_point_world),
+                "input_normal_world": _vector(input_normal_world),
+                "input_direction_world": _vector(frame.v_axis),
+                "square_vertices_world": [_vector(vertex) for vertex in frame.vertices],
+                "origin_world": _vector(frame.vertices[0]),
+                "center_world": _vector(frame.center),
+                "u_axis_world": _vector(frame.u_axis),
+                "v_axis_world": _vector(frame.v_axis),
+                "normal_world": _vector(frame.normal),
+                "width_mm": float(frame.width_mm),
+                "length_mm": float(frame.length_mm),
+                "exclusion_reason": "ct_fov_exceeded",
+                "fov_diagnostics": fov_diagnostics,
+            }
+            self._append_jsonl(self.manifest_path, record)
+            self._append_jsonl(self.case_directory / "excluded_fov.jsonl", record)
+            self.completed_statuses[sample_id] = "excluded_fov"
+            return "excluded_fov"
 
     def _write_sample(
         self,

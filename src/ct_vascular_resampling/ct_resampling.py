@@ -48,6 +48,17 @@ class CTVolume:
         return indices.reshape(points.shape)
 
 
+def square_vertices_inside_ct(volume: CTVolume, vertices_world: np.ndarray) -> bool:
+    """判断方形四个世界坐标顶点是否完全位于原始 CT FOV 内。"""
+
+    vertices = np.asarray(vertices_world, dtype=np.float64)
+    if vertices.shape != (4, 3):
+        raise ValueError("vertices_world 必须是 4×3 数组")
+    indices_xyz = volume.world_to_continuous_indices(vertices)
+    upper_xyz = np.asarray(volume.data_zyx.shape[::-1], dtype=np.float64) - 1.0
+    return bool(np.all(indices_xyz >= 0.0) and np.all(indices_xyz <= upper_xyz))
+
+
 @dataclass(frozen=True)
 class SquareFovDiagnosis:
     """方形采样网格相对 CT 原始体积范围的精确诊断。"""

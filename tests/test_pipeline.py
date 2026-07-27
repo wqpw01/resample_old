@@ -106,7 +106,7 @@ def test_rejected_precomputed_square_skips_vessel_intersection(monkeypatch, tmp_
     assert status == "rejected"
 
 
-def test_rejected_square_records_ct_fov_diagnostics(tmp_path):
+def test_out_of_fov_square_is_excluded_without_ct_artifacts(tmp_path):
     image = sitk.GetImageFromArray(np.full((16, 16, 16), 40.0, dtype=np.float32))
     volume = CTVolume.from_sitk(image)
     sample = SquareSample(
@@ -120,9 +120,77 @@ def test_rejected_square_records_ct_fov_diagnostics(tmp_path):
 
     status = render_square_sample(sample, volume, [], CTConfig(output_resolution=20), FilterConfig(), writer)
 
-    record = json.loads((tmp_path / "case" / "rejected" / "rejected.jsonl").read_text(encoding="utf-8"))
-    assert status == "rejected"
+    record = json.loads((tmp_path / "case" / "excluded_fov.jsonl").read_text(encoding="utf-8"))
+    assert status == "excluded_fov"
     assert record["fov_diagnostics"]["contains_ct_fov_exceedance"] is True
+    assert not (tmp_path / "case" / "rejected").exists()
+
+
+def test_run_case_excludes_fov_square_before_ct_interpolation(monkeypatch, tmp_path):
+    ct_path = tmp_path / "ct.nrrd"
+    sitk.WriteImage(sitk.GetImageFromArray(np.full((16, 16, 16), 40.0, dtype=np.float32)), str(ct_path))
+    mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    mesh_path = tmp_path / "model.obj"
+    mesh.export(mesh_path)
+    organ_models = {
+        name: mesh_path
+        for name in (
+            "adrenal_gland_left",
+            "adrenal_gland_right",
+            "aorta",
+            "duodenum",
+            "esophagus",
+            "gallbladder",
+            "inferior_vena_cava",
+            "kidney_left",
+            "kidney_right",
+            "liver",
+            "pancreas",
+            "portal_vein_and_splenic_vein",
+            "spleen",
+            "stomach",
+        )
+    }
+    config = CaseConfig(
+        case_id="fov_case",
+        ct_path=ct_path,
+        output_root=tmp_path / "output",
+        organ_models=organ_models,
+        vessel_models=(
+            VesselModel("artery_tree", mesh_path, "artery", (255, 82, 0)),
+            VesselModel("vein_tree", mesh_path, "vein", (0, 188, 212)),
+        ),
+        registration_module_path=tmp_path / "2021.py",
+        sampling=SamplingConfig(
+            point_counts={"stomach": 1, "liver": 1, "pancreas": 1, "duodenum_part1": 1, "duodenum_part2": 1, "esophagus": 1}
+        ),
+        square=SquareConfig(side_length_mm=10.0),
+        ct=CTConfig(output_resolution=20),
+        filtering=FilterConfig(),
+        runtime=RuntimeConfig(seed=0, workers=1, backend="cpu"),
+    )
+    outside_sample = SquareSample(
+        sample_id="esophagus-000010-x-01",
+        organ="esophagus",
+        probe_point_world=np.asarray([1.0, 3.0, 5.0]),
+        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
+        vertices=np.asarray([[-1.0, 2.0, 5.0], [3.0, 2.0, 5.0], [3.0, 6.0, 5.0], [-1.0, 6.0, 5.0]]),
+    )
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+
+    def unexpected_ct_interpolation(*_):
+        raise AssertionError("FOV exclusion must happen before CT interpolation")
+
+    monkeypatch.setattr(CachedCpuBackend, "sample_many", unexpected_ct_interpolation)
+
+    summary = run_case(config, steps=["render"], workers=1)
+
+    case_directory = tmp_path / "output" / "fov_case"
+    record = json.loads((case_directory / "excluded_fov.jsonl").read_text(encoding="utf-8"))
+    assert summary.status_counts == {"excluded_fov": 1}
+    assert record["fov_diagnostics"]["contains_ct_fov_exceedance"] is True
+    assert not (case_directory / "rejected").exists()
 
 
 def test_run_case_writes_legacy_intermediates_and_gallery(monkeypatch, tmp_path):

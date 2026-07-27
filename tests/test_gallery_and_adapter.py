@@ -61,6 +61,30 @@ def test_gallery_writer_routes_empty_and_rejected_samples_to_separate_directorie
     assert (tmp_path / "case_001" / "rejected" / "rejected.jsonl").is_file()
 
 
+def test_gallery_writer_persists_fov_exclusion_without_png_assets(tmp_path):
+    case_directory = tmp_path / "case_001"
+    writer = GalleryWriter(case_directory, case_id="case_001")
+
+    status = writer.write_fov_exclusion(
+        sample_id="esophagus-000010-x-01",
+        organ="esophagus",
+        probe_point_world=np.asarray([1.0, 2.0, 3.0]),
+        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
+        frame=_frame(),
+        fov_diagnostics={"contains_ct_fov_exceedance": True, "out_of_bounds_ratio": 0.62},
+    )
+
+    assert status == "excluded_fov"
+    assert writer.completed_status("esophagus-000010-x-01") == "excluded_fov"
+    record = json.loads((case_directory / "excluded_fov.jsonl").read_text(encoding="utf-8"))
+    assert record["status"] == "excluded_fov"
+    assert record["exclusion_reason"] == "ct_fov_exceeded"
+    assert record["fov_diagnostics"]["out_of_bounds_ratio"] == 0.62
+    assert "ct_png" not in record
+    assert not (case_directory / "excluded_fov" / "ct").exists()
+    assert GalleryWriter(case_directory, case_id="case_001").completed_status("esophagus-000010-x-01") == "excluded_fov"
+
+
 def test_rectangle_ply_contains_four_vertices_per_frame(tmp_path):
     path = tmp_path / "rectangles.ply"
 

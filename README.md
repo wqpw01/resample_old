@@ -50,7 +50,7 @@ ct_vascular_resampling/
 
 ### 重采样结果与检索入口
 
-一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像；`manifest.jsonl` 汇总三类全部样本，`library_summary.json` 记录检索特征统计，`run_metadata.json` 记录后端与运行信息。
+一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断，但不生成 CT、边界或叠加 PNG。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录检索特征统计，`run_metadata.json` 记录后端、运行信息和 `excluded_fov_count`。
 
 供 `2021.py` 检索时只加载 `gallery/gallery.jsonl`；`registration_adapter.load_gallery_database()` 会将其中的特征和方位转换为 `FeatureVector`、`VesselTriplet` 与 `ProbePose`，无需将 JSONL 转换为另一种文件格式。
 
@@ -76,7 +76,7 @@ python main.py --case-config configs/case.yaml --workers 8
 
 ## Rejected FOV 审计
 
-对已生成的 `rejected/rejected.jsonl`，可使用原始 NRRD/NIfTI 或指定 DICOM Series 复算每个方形的连续体素坐标，区分 CT FOV 外常量填充与 CT 范围内低 HU/空气。基于 `configs/rejected_audit.example.yaml` 填写路径后运行：
+当前管线会在 CT 插值前将任一顶点超出 FOV 的方形写入 `excluded_fov.jsonl`，因此不会把这类已知常量填充图像混入 `rejected/`。对于历史上已经生成的 `rejected/rejected.jsonl`，仍可使用原始 NRRD/NIfTI 或指定 DICOM Series 复算每个方形的连续体素坐标，区分 CT FOV 外常量填充与 CT 范围内低 HU/空气。基于 `configs/rejected_audit.example.yaml` 填写路径后运行：
 
 ```bash
 python main.py --rejected-audit-config configs/rejected_audit.yaml

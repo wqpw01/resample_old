@@ -3,7 +3,14 @@ from __future__ import annotations
 import numpy as np
 import SimpleITK as sitk
 
-from ct_vascular_resampling.ct_resampling import CTVolume, diagnose_square_fov, hu_to_grayscale, load_ct, sample_ct_square
+from ct_vascular_resampling.ct_resampling import (
+    CTVolume,
+    diagnose_square_fov,
+    hu_to_grayscale,
+    load_ct,
+    sample_ct_square,
+    square_vertices_inside_ct,
+)
 
 
 def _physical_point(image: sitk.Image, index: tuple[int, int, int]) -> np.ndarray:
@@ -92,3 +99,24 @@ def test_square_fov_diagnosis_marks_exact_pixels_outside_ct_volume():
     assert diagnosis.out_of_bounds_ratio == 1.0 / 3.0
     assert diagnosis.probe_point_inside_ct is True
     assert diagnosis.face_out_of_bounds_ratios["x_low"] == 1.0 / 3.0
+
+
+def test_square_vertices_inside_ct_uses_ct_physical_space_for_all_four_vertices():
+    image = sitk.GetImageFromArray(np.zeros((4, 4, 4), dtype=np.int16))
+    image.SetSpacing((2.0, 3.0, 4.0))
+    image.SetOrigin((10.0, 20.0, 30.0))
+    image.SetDirection((0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+    volume = CTVolume.from_sitk(image)
+    vertices = np.asarray(
+        [
+            _physical_point(image, (0, 0, 0)),
+            _physical_point(image, (3, 0, 0)),
+            _physical_point(image, (3, 3, 0)),
+            _physical_point(image, (0, 3, 0)),
+        ]
+    )
+    outside_vertices = vertices.copy()
+    outside_vertices[3] = _physical_point(image, (0, 4, 0))
+
+    assert square_vertices_inside_ct(volume, vertices) is True
+    assert square_vertices_inside_ct(volume, outside_vertices) is False
