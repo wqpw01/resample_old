@@ -84,6 +84,20 @@ python main.py --rejected-audit-config configs/rejected_audit.yaml
 
 审计在 `output_directory` 写入全量 `rejected_fov_audit.jsonl`、`summary.json`、`summary.csv`，并按原因保存有限数量的代表性越界掩码与叠加图。它不会移动或改写原 `rejected`、`gallery`、`unindexed` 内容。运行时新产生的 rejected 记录也会在其 JSONL 中附加 `fov_diagnostics`。
 
+### 提取历史 FOV 边界样本
+
+若需要单独复核历史结果中“原先为 `black_ratio`、审计后为 `fov_boundary_aligned`”的样本，可运行：
+
+```bash
+python scripts/extract_fov_boundary_samples.py \
+  --library-root /path/to/case_2 \
+  --audit-jsonl /path/to/case_2/rejected/diagnostics/rejected_fov_audit.jsonl \
+  --destination /path/to/black_ratio_fov_boundary_aligned_5 \
+  --limit 5
+```
+
+每个样本子目录包含 `ct.png`、`ct_overlay.png`、`boundary_only.png`、可用时的 FOV 越界掩码/叠加图以及 `metadata.json`。输出根目录的 `locations.csv` 保存探头点、方形四顶点、连续体素索引范围和越界比例。
+
 ## 自动器官预处理
 
 自动病例入口只接收 CT 和一份含动脉、静脉、门静脉的 NRRD/NIfTI 血管标签图。它调用 TotalSegmentator 的 `total` 任务生成源采样规则所需器官掩膜与物理空间 PLY 网格；门静脉会与静脉合并为 `vein_tree`。病例配置可从 `configs/auto_case.example.yaml` 开始：
