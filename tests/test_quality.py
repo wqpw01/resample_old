@@ -29,14 +29,15 @@ def test_quality_rejects_long_vertical_boundary_with_black_on_one_side():
     assert result.line_length_px >= 0.7 * np.hypot(100, 100)
 
 
-def test_quality_keeps_boundary_line_evidence_when_black_ratio_already_rejects():
+def test_quality_prioritizes_boundary_line_when_black_ratio_also_exceeds_limit():
     pixels = np.full((100, 100), 127, dtype=np.uint8)
     pixels[:, :60] = 0
 
     result = evaluate_ct_quality(pixels, FilterConfig())
 
     assert result.accepted is False
-    assert result.reason == "black_ratio"
+    assert result.reason == "black_boundary_line"
+    assert result.black_ratio_exceeded is True
     assert result.line_length_px is not None
     assert result.line_segment_px is not None
 

@@ -66,6 +66,7 @@ def _quality_record(quality: QualityResult) -> dict[str, object]:
         "accepted": quality.accepted,
         "reason": quality.reason,
         "black_ratio": quality.black_ratio,
+        "black_ratio_exceeded": quality.black_ratio_exceeded,
         "line_length_px": quality.line_length_px,
         "black_side_ratio": quality.black_side_ratio,
         "valid_side_black_ratio": quality.valid_side_black_ratio,

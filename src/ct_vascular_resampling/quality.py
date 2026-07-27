@@ -19,6 +19,7 @@ class QualityResult:
     black_side_ratio: float | None = None
     valid_side_black_ratio: float | None = None
     line_segment_px: tuple[int, int, int, int] | None = None
+    black_ratio_exceeded: bool = False
 
 
 def _line_quality(mask: np.ndarray, config: FilterConfig) -> tuple[float, float, float, tuple[int, int, int, int]] | None:
@@ -67,12 +68,19 @@ def evaluate_ct_quality(pixels: np.ndarray, config: FilterConfig) -> QualityResu
     black_mask = values < config.black_threshold
     black_ratio = float(np.mean(black_mask))
     line = _line_quality(black_mask, config)
-    if black_ratio > config.black_ratio_limit:
-        if line is None:
-            return QualityResult(False, "black_ratio", black_ratio)
-        length, black_side, valid_side, segment = line
-        return QualityResult(False, "black_ratio", black_ratio, length, black_side, valid_side, segment)
+    black_ratio_exceeded = black_ratio > config.black_ratio_limit
     if line is not None:
         length, black_side, valid_side, segment = line
-        return QualityResult(False, "black_boundary_line", black_ratio, length, black_side, valid_side, segment)
-    return QualityResult(True, None, black_ratio)
+        return QualityResult(
+            False,
+            "black_boundary_line",
+            black_ratio,
+            length,
+            black_side,
+            valid_side,
+            segment,
+            black_ratio_exceeded,
+        )
+    if black_ratio_exceeded:
+        return QualityResult(False, "black_ratio", black_ratio, black_ratio_exceeded=True)
+    return QualityResult(True, None, black_ratio, black_ratio_exceeded=False)

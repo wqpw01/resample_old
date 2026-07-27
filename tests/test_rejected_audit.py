@@ -51,5 +51,6 @@ def test_rejected_audit_writes_fov_cause_summary_and_representative_images(tmp_p
     audit_record = json.loads((rejected_root / "diagnostics" / "rejected_fov_audit.jsonl").read_text(encoding="utf-8"))
     assert summary.sample_count == 1
     assert summary.cause_counts == {"fov_boundary_aligned": 1}
+    assert audit_record["recomputed_quality"]["black_ratio_exceeded"] is True
     assert audit_record["fov_diagnostics"]["cause"] == "fov_boundary_aligned"
     assert (rejected_root / "diagnostics" / "representatives" / "fov_boundary_aligned" / "sample_overlay.png").is_file()

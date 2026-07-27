@@ -85,6 +85,36 @@ def test_gallery_writer_persists_fov_exclusion_without_png_assets(tmp_path):
     assert GalleryWriter(case_directory, case_id="case_001").completed_status("esophagus-000010-x-01") == "excluded_fov"
 
 
+def test_gallery_writer_preserves_combined_line_and_black_ratio_quality_evidence(tmp_path):
+    writer = GalleryWriter(tmp_path / "case_001", case_id="case_001")
+    empty = render_sample_images(np.full((20, 20), 127, dtype=np.uint8), 10.0, 10.0, [])
+
+    status = writer.write_sample(
+        "boundary",
+        "liver",
+        np.zeros(3),
+        np.array([0.0, 0.0, 1.0]),
+        _frame(),
+        empty,
+        QualityResult(
+            False,
+            "black_boundary_line",
+            0.60,
+            line_length_px=100.0,
+            black_side_ratio=1.0,
+            valid_side_black_ratio=0.0,
+            line_segment_px=(10, 0, 10, 99),
+            black_ratio_exceeded=True,
+        ),
+    )
+
+    record = json.loads((tmp_path / "case_001" / "rejected" / "rejected.jsonl").read_text(encoding="utf-8"))
+    assert status == "rejected"
+    assert record["quality"]["reason"] == "black_boundary_line"
+    assert record["quality"]["black_ratio_exceeded"] is True
+    assert record["quality"]["line_segment_px"] == [10, 0, 10, 99]
+
+
 def test_rectangle_ply_contains_four_vertices_per_frame(tmp_path):
     path = tmp_path / "rectangles.ply"
 
