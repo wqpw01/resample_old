@@ -50,7 +50,7 @@ ct_vascular_resampling/
 
 ### 重采样结果与检索入口
 
-一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断，但不生成 CT、边界或叠加 PNG。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录检索特征统计，`run_metadata.json` 记录后端、运行信息和 `excluded_fov_count`。
+一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录检索特征统计，`run_metadata.json` 记录后端、运行信息和 `excluded_fov_count`。
 
 供 `2021.py` 检索时只加载 `gallery/gallery.jsonl`；`registration_adapter.load_gallery_database()` 会将其中的特征和方位转换为 `FeatureVector`、`VesselTriplet` 与 `ProbePose`，无需将 JSONL 转换为另一种文件格式。
 
@@ -76,7 +76,7 @@ python main.py --case-config configs/case.yaml --workers 8
 
 ## Rejected FOV 审计
 
-当前管线会在 CT 插值前将任一顶点超出 FOV 的方形写入 `excluded_fov.jsonl`，因此不会把这类已知常量填充图像混入 `rejected/`。对于历史上已经生成的 `rejected/rejected.jsonl`，仍可使用原始 NRRD/NIfTI 或指定 DICOM Series 复算每个方形的连续体素坐标，区分 CT FOV 外常量填充与 CT 范围内低 HU/空气。基于 `configs/rejected_audit.example.yaml` 填写路径后运行：
+当前管线会先按方形顶点判断 CT FOV 越界，再使用所选 CPU/GPU 后端生成诊断 CT，并把逐像素越界区域强制填黑。此类样本固定写入 `excluded_fov.jsonl` 和 `excluded_fov/ct/`，不会进入质量筛选、血管求交或 `rejected/`。对于历史上已经生成的 `rejected/rejected.jsonl`，仍可使用原始 NRRD/NIfTI 或指定 DICOM Series 复算每个方形的连续体素坐标，区分 CT FOV 外常量填充与 CT 范围内低 HU/空气。基于 `configs/rejected_audit.example.yaml` 填写路径后运行：
 
 ```bash
 python main.py --rejected-audit-config configs/rejected_audit.yaml
