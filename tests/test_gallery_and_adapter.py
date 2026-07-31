@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import numpy as np
+from PIL import Image
 
 from ct_vascular_resampling.gallery import GalleryWriter, write_rectangles_ply
 from ct_vascular_resampling.geometry import frame_from_vertices
@@ -61,9 +62,10 @@ def test_gallery_writer_routes_empty_and_rejected_samples_to_separate_directorie
     assert (tmp_path / "case_001" / "rejected" / "rejected.jsonl").is_file()
 
 
-def test_gallery_writer_persists_fov_exclusion_without_png_assets(tmp_path):
+def test_gallery_writer_persists_fov_exclusion_with_ct_only(tmp_path):
     case_directory = tmp_path / "case_001"
     writer = GalleryWriter(case_directory, case_id="case_001")
+    ct_image = Image.fromarray(np.full((20, 20), 91, dtype=np.uint8))
 
     status = writer.write_fov_exclusion(
         sample_id="esophagus-000010-x-01",
@@ -72,16 +74,24 @@ def test_gallery_writer_persists_fov_exclusion_without_png_assets(tmp_path):
         input_normal_world=np.asarray([0.0, 0.0, 1.0]),
         frame=_frame(),
         fov_diagnostics={"contains_ct_fov_exceedance": True, "out_of_bounds_ratio": 0.62},
+        ct_image=ct_image,
+        resampling_backend="cpu",
     )
 
     assert status == "excluded_fov"
     assert writer.completed_status("esophagus-000010-x-01") == "excluded_fov"
     record = json.loads((case_directory / "excluded_fov.jsonl").read_text(encoding="utf-8"))
+    ct_path = case_directory / "excluded_fov" / "ct" / "esophagus-000010-x-01.png"
     assert record["status"] == "excluded_fov"
     assert record["exclusion_reason"] == "ct_fov_exceeded"
     assert record["fov_diagnostics"]["out_of_bounds_ratio"] == 0.62
-    assert "ct_png" not in record
-    assert not (case_directory / "excluded_fov" / "ct").exists()
+    assert record["ct_png"] == "ct/esophagus-000010-x-01.png"
+    assert record["resampling_backend"] == "cpu"
+    assert "boundary_only_png" not in record
+    assert "ct_overlay_png" not in record
+    with Image.open(ct_path) as saved:
+        assert saved.mode == "L"
+        assert np.all(np.asarray(saved) == 91)
     assert GalleryWriter(case_directory, case_id="case_001").completed_status("esophagus-000010-x-01") == "excluded_fov"
 
 

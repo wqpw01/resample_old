@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Iterable
 
 import numpy as np
+from PIL import Image
 
 from .geometry import SquareFrame
 from .quality import QualityResult
@@ -123,12 +124,17 @@ class GalleryWriter:
         input_normal_world: np.ndarray,
         frame: SquareFrame,
         fov_diagnostics: dict[str, object],
+        ct_image: Image.Image,
+        resampling_backend: str,
     ) -> str:
-        """记录 CT FOV 外的方形，不生成 CT 或血管 PNG。"""
+        """记录 CT FOV 外的方形，只保存黑色填充的灰度 CT PNG。"""
 
         with self._lock:
             if sample_id in self.completed_statuses:
                 return self.completed_statuses[sample_id]
+            root = self.case_directory / "excluded_fov"
+            ct_path = root / "ct" / f"{sample_id}.png"
+            self._save_png(ct_image, ct_path)
             record = {
                 "frame_id": self.case_id,
                 "slice_id": sample_id,
@@ -148,6 +154,8 @@ class GalleryWriter:
                 "length_mm": float(frame.length_mm),
                 "exclusion_reason": "ct_fov_exceeded",
                 "fov_diagnostics": fov_diagnostics,
+                "ct_png": str(ct_path.relative_to(root)),
+                "resampling_backend": resampling_backend,
             }
             self._append_jsonl(self.manifest_path, record)
             self._append_jsonl(self.case_directory / "excluded_fov.jsonl", record)
