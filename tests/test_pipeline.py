@@ -125,7 +125,14 @@ def test_out_of_fov_square_writes_black_filled_ct_only(monkeypatch, tmp_path):
     monkeypatch.setattr("ct_vascular_resampling.pipeline.evaluate_ct_quality", unexpected_processing)
     monkeypatch.setattr("ct_vascular_resampling.pipeline.intersect_mesh_with_square", unexpected_processing)
 
-    status = render_square_sample(sample, volume, [], CTConfig(output_resolution=20), FilterConfig(), writer)
+    status = render_square_sample(
+        sample,
+        volume,
+        [],
+        CTConfig(output_resolution=20, fill_hu_value=40.0),
+        FilterConfig(),
+        writer,
+    )
 
     record = json.loads((tmp_path / "case" / "excluded_fov.jsonl").read_text(encoding="utf-8"))
     ct_path = tmp_path / "case" / "excluded_fov" / "ct" / "stomach-000000-x-00.png"
