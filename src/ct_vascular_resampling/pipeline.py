@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+from PIL import Image
 import trimesh
 
 from .artifacts import write_square_samples_ply, write_surface_samples_ply
@@ -51,13 +52,15 @@ class RunSummary:
     indexed_feature_count: int = 0
 
 
-def _exclude_fov_sample_if_needed(
+def _render_fov_exclusion_if_needed(
     sample: SquareSample,
+    hu: np.ndarray,
     volume: CTVolume,
     ct_settings: CTConfig,
     writer: GalleryWriter,
+    resampling_backend: str,
 ) -> str | None:
-    """在 CT 插值前把任一顶点超出 FOV 的方形写入独立清单。"""
+    """将超出 FOV 的方形保存为带纯黑越界区域的独立 CT。"""
 
     if square_vertices_inside_ct(volume, sample.vertices):
         return None
@@ -68,6 +71,8 @@ def _exclude_fov_sample_if_needed(
         ct_settings.output_resolution,
         probe_point_world=sample.probe_point_world,
     )
+    ct_pixels = hu_to_grayscale(hu, ct_settings.window_level, ct_settings.window_width).copy()
+    ct_pixels[diagnosis.out_of_bounds_mask] = 0
     return writer.write_fov_exclusion(
         sample_id=sample.sample_id,
         organ=sample.organ,
@@ -75,6 +80,8 @@ def _exclude_fov_sample_if_needed(
         input_normal_world=sample.input_normal_world,
         frame=frame,
         fov_diagnostics=diagnosis.to_record(),
+        ct_image=Image.fromarray(ct_pixels),
+        resampling_backend=resampling_backend,
     )
 
 
@@ -91,12 +98,18 @@ def render_square_sample(
     completed = writer.completed_status(sample.sample_id)
     if completed is not None:
         return completed
-    excluded_status = _exclude_fov_sample_if_needed(sample, volume, ct_settings, writer)
-    if excluded_status is not None:
-        return excluded_status
     frame = frame_from_vertices(sample.vertices)
     hu = sample_ct_square(volume, frame.vertices, ct_settings.output_resolution, ct_settings.fill_hu_value)
-    return render_precomputed_square(sample, hu, vessels, ct_settings, filter_settings, writer, volume=volume)
+    return render_precomputed_square(
+        sample,
+        hu,
+        vessels,
+        ct_settings,
+        filter_settings,
+        writer,
+        resampling_backend="cpu",
+        volume=volume,
+    )
 
 
 def render_precomputed_square(
@@ -116,7 +129,14 @@ def render_precomputed_square(
     if completed is not None:
         return completed
     if volume is not None:
-        excluded_status = _exclude_fov_sample_if_needed(sample, volume, ct_settings, writer)
+        excluded_status = _render_fov_exclusion_if_needed(
+            sample,
+            hu,
+            volume,
+            ct_settings,
+            writer,
+            resampling_backend or "cpu",
+        )
         if excluded_status is not None:
             return excluded_status
     frame = frame_from_vertices(sample.vertices)
@@ -227,10 +247,6 @@ def run_case(
             completed = writer.completed_status(sample.sample_id)
             if completed is not None:
                 statuses[completed] += 1
-                continue
-            excluded_status = _exclude_fov_sample_if_needed(sample, volume, config.ct, writer)
-            if excluded_status is not None:
-                statuses[excluded_status] += 1
                 continue
             pending_samples.append(sample)
         vessels = [
@@ -358,6 +374,7 @@ def run_case(
                     executor.shutdown(wait=True)
         finally:
             backend_metadata["selected_backend"] = backend.name
+            backend_metadata["excluded_fov_count"] = statuses["excluded_fov"]
             _write_run_metadata(case_directory, backend_metadata)
             backend.close()
     indexed_feature_count = 0

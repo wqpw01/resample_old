@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import numpy as np
+from PIL import Image
 import SimpleITK as sitk
 import trimesh
 from pathlib import Path
@@ -16,7 +17,7 @@ from ct_vascular_resampling.config import (
     SquareConfig,
     VesselModel,
 )
-from ct_vascular_resampling.ct_resampling import CTVolume
+from ct_vascular_resampling.ct_resampling import CTVolume, diagnose_square_fov
 from ct_vascular_resampling.gallery import GalleryWriter
 from ct_vascular_resampling.pipeline import PreparedVessel, render_precomputed_square, render_square_sample, run_case
 from ct_vascular_resampling.resampling_backend import CachedCpuBackend
@@ -106,7 +107,7 @@ def test_rejected_precomputed_square_skips_vessel_intersection(monkeypatch, tmp_
     assert status == "rejected"
 
 
-def test_out_of_fov_square_is_excluded_without_ct_artifacts(tmp_path):
+def test_out_of_fov_square_writes_black_filled_ct_only(monkeypatch, tmp_path):
     image = sitk.GetImageFromArray(np.full((16, 16, 16), 40.0, dtype=np.float32))
     volume = CTVolume.from_sitk(image)
     sample = SquareSample(
@@ -118,15 +119,32 @@ def test_out_of_fov_square_is_excluded_without_ct_artifacts(tmp_path):
     )
     writer = GalleryWriter(tmp_path / "case", "case")
 
+    def unexpected_processing(*_):
+        raise AssertionError("excluded FOV samples must skip quality and vessel processing")
+
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.evaluate_ct_quality", unexpected_processing)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.intersect_mesh_with_square", unexpected_processing)
+
     status = render_square_sample(sample, volume, [], CTConfig(output_resolution=20), FilterConfig(), writer)
 
     record = json.loads((tmp_path / "case" / "excluded_fov.jsonl").read_text(encoding="utf-8"))
+    ct_path = tmp_path / "case" / "excluded_fov" / "ct" / "stomach-000000-x-00.png"
+    with Image.open(ct_path) as image:
+        pixels = np.asarray(image)
+    diagnosis = diagnose_square_fov(volume, sample.vertices, resolution=20)
     assert status == "excluded_fov"
     assert record["fov_diagnostics"]["contains_ct_fov_exceedance"] is True
+    assert record["ct_png"] == "ct/stomach-000000-x-00.png"
+    assert record["resampling_backend"] == "cpu"
+    assert pixels.ndim == 2
+    assert np.all(pixels[diagnosis.out_of_bounds_mask] == 0)
+    assert np.any(pixels[~diagnosis.out_of_bounds_mask] > 0)
+    assert not (tmp_path / "case" / "gallery").exists()
+    assert not (tmp_path / "case" / "unindexed").exists()
     assert not (tmp_path / "case" / "rejected").exists()
 
 
-def test_run_case_excludes_fov_square_before_ct_interpolation(monkeypatch, tmp_path):
+def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_path):
     ct_path = tmp_path / "ct.nrrd"
     sitk.WriteImage(sitk.GetImageFromArray(np.full((16, 16, 16), 40.0, dtype=np.float32)), str(ct_path))
     mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
@@ -178,18 +196,26 @@ def test_run_case_excludes_fov_square_before_ct_interpolation(monkeypatch, tmp_p
     )
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_: {})
     monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+    sample_many_calls: list[int] = []
+    original_sample_many = CachedCpuBackend.sample_many
 
-    def unexpected_ct_interpolation(*_):
-        raise AssertionError("FOV exclusion must happen before CT interpolation")
+    def record_ct_interpolation(self, vertices_batch, resolution, fill_hu_value):
+        sample_many_calls.append(len(vertices_batch))
+        return original_sample_many(self, vertices_batch, resolution, fill_hu_value)
 
-    monkeypatch.setattr(CachedCpuBackend, "sample_many", unexpected_ct_interpolation)
+    monkeypatch.setattr(CachedCpuBackend, "sample_many", record_ct_interpolation)
 
     summary = run_case(config, steps=["render"], workers=1)
 
     case_directory = tmp_path / "output" / "fov_case"
     record = json.loads((case_directory / "excluded_fov.jsonl").read_text(encoding="utf-8"))
+    metadata = json.loads((case_directory / "run_metadata.json").read_text(encoding="utf-8"))
     assert summary.status_counts == {"excluded_fov": 1}
+    assert sample_many_calls == [1]
     assert record["fov_diagnostics"]["contains_ct_fov_exceedance"] is True
+    assert record["resampling_backend"] == "cpu"
+    assert (case_directory / "excluded_fov" / "ct" / "esophagus-000010-x-01.png").is_file()
+    assert metadata["excluded_fov_count"] == 1
     assert not (case_directory / "rejected").exists()
 
 
