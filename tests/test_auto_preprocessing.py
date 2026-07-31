@@ -99,3 +99,30 @@ vessel_label_values:
     assert config.case_id == "auto_case"
     assert config.ct_path == tmp_path / "input" / "ct.nrrd"
     assert config.vessel_label_values == {"artery": (11,), "vein": (22,), "portal": (33,)}
+
+
+def test_auto_case_config_resolves_relative_config_paths_to_absolute(tmp_path, monkeypatch):
+    from ct_vascular_resampling.auto_preprocessing import load_auto_case_config
+
+    workspace = tmp_path / "workspace"
+    (workspace / "configs").mkdir(parents=True)
+    config_path = workspace / "configs" / "auto_case.yaml"
+    config_path.write_text(
+        """
+case_id: auto_case
+ct_path: ../input/ct.nrrd
+vascular_segmentation_path: ../input/vessels.nrrd
+registration_module_path: ../registration/2021.py
+output_root: ../output
+vessel_label_values:
+  artery: [11]
+  vein: [22]
+  portal: [33]
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(workspace)
+
+    config = load_auto_case_config(Path("configs/auto_case.yaml"))
+
+    assert config.registration_module_path == (workspace / "registration" / "2021.py").resolve()

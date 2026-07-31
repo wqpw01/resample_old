@@ -42,7 +42,7 @@ def _resolve_path(value: Any, root: Path, field: str) -> Path:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field} 必须是非空路径字符串")
     path = Path(value).expanduser()
-    return path if path.is_absolute() else root / path
+    return (path if path.is_absolute() else root / path).resolve()
 
 
 def _label_values(raw: Any) -> dict[str, tuple[int, ...]]:
