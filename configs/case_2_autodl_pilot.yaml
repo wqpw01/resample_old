@@ -46,7 +46,7 @@ ct:
   fill_hu_value: -1000.0
 filtering:
   black_threshold: 50
-  black_ratio_limit: 0.3
+  black_ratio_limit: 0.5
   line_min_diagonal_fraction: 0.7
   black_side_min_ratio: 0.9
   valid_side_max_black_ratio: 0.1

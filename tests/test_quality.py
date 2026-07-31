@@ -6,15 +6,29 @@ from ct_vascular_resampling.config import FilterConfig
 from ct_vascular_resampling.quality import evaluate_ct_quality
 
 
-def test_quality_rejects_black_pixels_over_thirty_percent():
-    pixels = np.full((10, 10), 127, dtype=np.uint8)
-    pixels.ravel()[:31] = 0
+def _pixels_with_black_ratio(ratio: float) -> np.ndarray:
+    pixels = np.full((100, 100), 127, dtype=np.uint8)
+    rng = np.random.default_rng(0)
+    pixels.ravel()[rng.choice(pixels.size, int(pixels.size * ratio), replace=False)] = 0
+    return pixels
+
+
+def test_quality_accepts_black_pixels_below_fifty_percent():
+    result = evaluate_ct_quality(_pixels_with_black_ratio(0.40), FilterConfig())
+
+    assert result.accepted is True
+    assert result.reason is None
+    assert result.black_ratio == 0.40
+
+
+def test_quality_rejects_black_pixels_over_fifty_percent():
+    pixels = _pixels_with_black_ratio(0.51)
 
     result = evaluate_ct_quality(pixels, FilterConfig())
 
     assert result.accepted is False
     assert result.reason == "black_ratio"
-    assert result.black_ratio == 0.31
+    assert result.black_ratio == 0.51
 
 
 def test_quality_rejects_long_vertical_boundary_with_black_on_one_side():

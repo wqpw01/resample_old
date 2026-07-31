@@ -88,7 +88,7 @@ class CTConfig:
 @dataclass(frozen=True)
 class FilterConfig:
     black_threshold: int = 50
-    black_ratio_limit: float = 0.30
+    black_ratio_limit: float = 0.50
     line_min_diagonal_fraction: float = 0.70
     black_side_min_ratio: float = 0.90
     valid_side_max_black_ratio: float = 0.10
@@ -250,7 +250,7 @@ def _load_filter(raw: Any) -> FilterConfig:
         raise ValueError("filtering.black_threshold 必须在 0-255 内")
     return FilterConfig(
         black_threshold=black_threshold,
-        black_ratio_limit=_ratio(values.get("black_ratio_limit"), "filtering.black_ratio_limit", 0.30),
+        black_ratio_limit=_ratio(values.get("black_ratio_limit"), "filtering.black_ratio_limit", 0.50),
         line_min_diagonal_fraction=_ratio(
             values.get("line_min_diagonal_fraction"), "filtering.line_min_diagonal_fraction", 0.70, allow_zero=False
         ),

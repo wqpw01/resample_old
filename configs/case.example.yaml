@@ -53,7 +53,7 @@ ct:
 
 filtering:
   black_threshold: 50
-  black_ratio_limit: 0.30
+  black_ratio_limit: 0.50
   line_min_diagonal_fraction: 0.70
   black_side_min_ratio: 0.90
   valid_side_max_black_ratio: 0.10

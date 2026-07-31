@@ -129,7 +129,7 @@ def _case_config(case_id: str, registration_module_path: Path, output_root: str 
         "ct": {"output_resolution": 300, "window_level": 40.0, "window_width": 400.0, "fill_hu_value": -1000.0},
         "filtering": {
             "black_threshold": 50,
-            "black_ratio_limit": 0.30,
+            "black_ratio_limit": 0.50,
             "line_min_diagonal_fraction": 0.70,
             "black_side_min_ratio": 0.90,
             "valid_side_max_black_ratio": 0.10,
