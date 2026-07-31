@@ -18,7 +18,7 @@ def test_rejected_audit_writes_fov_cause_summary_and_representative_images(tmp_p
     ct_directory = rejected_root / "ct"
     ct_directory.mkdir(parents=True)
     pixels = np.full((100, 100), 127, dtype=np.uint8)
-    pixels[:, :50] = 0
+    pixels[:, :51] = 0
     Image.fromarray(pixels).save(ct_directory / "sample.png")
     vertices = [[-100.0, 0.0, 0.0], [99.0, 0.0, 0.0], [99.0, 99.0, 0.0], [-100.0, 99.0, 0.0]]
     rejected_jsonl = rejected_root / "rejected.jsonl"
