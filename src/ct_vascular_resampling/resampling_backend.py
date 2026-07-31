@@ -116,14 +116,14 @@ class CuPyBackend:
                     sampled = self._map_coordinates(
                         self._coefficients_zyx,
                         coordinates,
-                        output=self._cp.float32,
+                        output=self._cp.float64,
                         order=3,
                         mode="constant",
                         cval=float(fill_hu_value),
                         prefilter=False,
                     )
                     device_results.append(sampled.reshape(resolution, resolution))
-                host_results.extend(self._cp.asnumpy(result) for result in device_results)
+                host_results.extend(self._cp.asnumpy(result).astype(np.float32, copy=False) for result in device_results)
         return np.stack(host_results, axis=0)
 
     def close(self) -> None:

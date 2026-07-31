@@ -68,6 +68,7 @@ def test_cupy_backend_uses_the_same_world_to_index_coordinates_as_cpu():
 
     class FakeCuPy:
         float32 = np.float32
+        float64 = np.float64
 
         class cuda:
             runtime = FakeRuntime()
@@ -82,10 +83,12 @@ def test_cupy_backend_uses_the_same_world_to_index_coordinates_as_cpu():
             return np.asarray(value)
 
     calls: list[np.ndarray] = []
+    outputs: list[np.dtype] = []
 
-    def fake_map_coordinates(_, coordinates, **__):
+    def fake_map_coordinates(_, coordinates, **kwargs):
         calls.append(np.asarray(coordinates))
-        return np.zeros(coordinates.shape[1], dtype=np.float32)
+        outputs.append(kwargs["output"])
+        return np.zeros(coordinates.shape[1], dtype=kwargs["output"])
 
     image = sitk.GetImageFromArray(np.zeros((6, 6, 6), dtype=np.float32))
     image.SetSpacing((2.0, 3.0, 4.0))
@@ -95,9 +98,11 @@ def test_cupy_backend_uses_the_same_world_to_index_coordinates_as_cpu():
     vertices = _physical_square(image, ((1, 1, 1), (3, 1, 1), (3, 3, 1), (1, 3, 1)))
 
     backend = CuPyBackend(CachedCpuBackend(volume), 0, 8, cupy_loader=lambda: (FakeCuPy, fake_map_coordinates))
-    backend.sample_many(vertices[None, ...], resolution=3, fill_hu_value=-1000.0)
+    sampled = backend.sample_many(vertices[None, ...], resolution=3, fill_hu_value=-1000.0)
 
     assert np.array_equal(calls, [square_coordinates_zyx(volume, vertices, resolution=3)])
+    assert outputs == [np.float64]
+    assert sampled.dtype == np.float32
 
 
 def test_backend_validation_rejects_hu_values_outside_the_strict_tolerance():
