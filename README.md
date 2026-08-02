@@ -112,6 +112,8 @@ python main.py --auto-case-config configs/auto_case.yaml --backend auto
 
 `totalsegmentator.cache_directory` 可指向已有分割目录，相对路径按自动病例 YAML 所在目录解析。程序仅在 14 个必需掩膜全部存在、非空，且 Size、Spacing、Origin、Direction 均与 CT 一致时跳过 TotalSegmentator；缓存缺失或无效时会向该目录重新生成并再次严格校验。未配置时仍使用 `<output_root>/<case_id>/preprocessing/totalsegmentator/`。预处理 `manifest.json` 的 provenance 会记录实际 `cache_directory`、`cache_reused`、计划命令及 `command_executed`。
 
+自动配置可通过 `square.deduplicate_degenerate_edge_angles` 显式控制退化角去重；省略时为 `false`，因此不会暗中改变既有采样集合。正式全量病例应在配置中明确记录所选值。
+
 `registration_module_path` 是既有 `2021.py` 检索引擎代码路径，不属于病例影像输入。首次运行会下载 TotalSegmentator 权重。建议在运行前设置 `TOTALSEG_HOME_DIR` 到持久磁盘路径；这与上述分割掩膜缓存相互独立。GPU 环境使用 `environment.totalseg.gpu.yml` 创建；自动输出位于 `<output_root>/<case_id>/preprocessing/`，原有 `gallery/`、`rejected/`、`unindexed/` 及 JSONL 输出不变。
 
 ## 二维裁剪标签检索特征

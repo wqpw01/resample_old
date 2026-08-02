@@ -47,7 +47,7 @@
 ### Task 5: Remote deployment and full build
 
 1. Record old output manifest hashes and disk/GPU state. Fast-forward the remote project to the pushed `main` while preserving untracked `case_data/`, `registration/`, and local configs.
-2. Create a remote auto config that uses the existing CT, `vascular_labels.nrrd`, `artery: [1]`, `vein: [2, 3]`, the validated TotalSegmentator cache, and the new `output_organs_v1` root.
+2. Create a remote auto config that uses the existing CT, `vascular_labels.nrrd`, `artery: [1]`, `vein: [2, 3]`, the validated TotalSegmentator cache, explicit `deduplicate_degenerate_edge_angles: true`, and the new `output_organs_v1` root.
 3. Run a small real-data pilot and verify image dimensions/modes/colors, allowed labels, unchanged vascular features, and expected state isolation. Use the pilot to estimate full runtime.
 4. Start the full run in a persistent session, monitor logs, process/GPU/disk growth, and status counts until completion. Resume only within the new output if interrupted.
 5. Verify the expected 167,724 total samples and prior state counts, all referenced files, one-to-one filename sets for four gallery image directories, 112,749 adapter-loadable gallery records, allowed organ labels, and unchanged old output hashes. Save the effective config, run log, validation JSON, and representative samples; do not create a full ZIP.

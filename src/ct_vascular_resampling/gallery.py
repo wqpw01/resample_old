@@ -49,9 +49,42 @@ class GalleryWriter:
         self.case_directory.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         self.completed_statuses = self._load_completed_statuses()
+        self._validate_gallery_manifest()
+
+    def _validate_gallery_record(self, record: dict) -> None:
+        combined_path = record.get("organ_vessel_boundary_png")
+        organ_labels = record.get("organ_labels")
+        if not isinstance(combined_path, str) or not isinstance(organ_labels, list):
+            raise ValueError(
+                "检测到旧版 gallery 记录，缺少 organ_vessel_boundary_png 或 organ_labels；请使用新的输出目录"
+            )
+        if not (self.case_directory / "gallery" / combined_path).is_file():
+            raise ValueError(f"gallery 组合图不存在: {combined_path}")
+
+    def _validate_gallery_manifest(self) -> None:
+        gallery_manifest = self.case_directory / "gallery" / "gallery.jsonl"
+        if not gallery_manifest.is_file():
+            return
+        with gallery_manifest.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    self._validate_gallery_record(record)
+                except json.JSONDecodeError as error:
+                    raise ValueError(f"gallery 清单第 {line_number} 行损坏: {error}") from error
 
     def _load_completed_statuses(self) -> dict[str, str]:
         if not self.manifest_path.is_file():
+            state_manifests = (
+                self.case_directory / "gallery" / "gallery.jsonl",
+                self.case_directory / "unindexed" / "unindexed.jsonl",
+                self.case_directory / "rejected" / "rejected.jsonl",
+                self.case_directory / "excluded_fov.jsonl",
+            )
+            if any(path.is_file() and path.stat().st_size > 0 for path in state_manifests):
+                raise ValueError("检测到状态清单但缺少根 manifest.jsonl；请使用完整的新输出目录")
             return {}
         completed: dict[str, str] = {}
         with self.manifest_path.open("r", encoding="utf-8") as handle:
@@ -63,14 +96,7 @@ class GalleryWriter:
                     sample_id = str(record["slice_id"])
                     status = str(record["status"])
                     if status == "gallery":
-                        combined_path = record.get("organ_vessel_boundary_png")
-                        organ_labels = record.get("organ_labels")
-                        if not isinstance(combined_path, str) or not isinstance(organ_labels, list):
-                            raise ValueError(
-                                "检测到旧版 gallery 记录，缺少 organ_vessel_boundary_png 或 organ_labels；请使用新的输出目录"
-                            )
-                        if not (self.case_directory / "gallery" / combined_path).is_file():
-                            raise ValueError(f"gallery 组合图不存在: {combined_path}")
+                        self._validate_gallery_record(record)
                     completed[sample_id] = status
                 except (json.JSONDecodeError, KeyError) as error:
                     raise ValueError(f"全量清单第 {line_number} 行损坏: {error}") from error

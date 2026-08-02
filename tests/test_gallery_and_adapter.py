@@ -119,6 +119,36 @@ def test_gallery_writer_rejects_resume_from_gallery_without_organ_artifacts(tmp_
         GalleryWriter(case_directory, case_id="case_001")
 
 
+def test_gallery_writer_rejects_state_manifest_when_root_manifest_is_missing(tmp_path):
+    case_directory = tmp_path / "case_001"
+    gallery_directory = case_directory / "gallery"
+    gallery_directory.mkdir(parents=True)
+    (gallery_directory / "gallery.jsonl").write_text(
+        json.dumps({"slice_id": "old-gallery", "status": "gallery"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="manifest.jsonl|旧版"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
+def test_gallery_writer_rejects_old_record_found_only_in_gallery_manifest(tmp_path):
+    case_directory = tmp_path / "case_001"
+    gallery_directory = case_directory / "gallery"
+    gallery_directory.mkdir(parents=True)
+    (case_directory / "manifest.jsonl").write_text(
+        json.dumps({"slice_id": "known-unindexed", "status": "unindexed"}) + "\n",
+        encoding="utf-8",
+    )
+    (gallery_directory / "gallery.jsonl").write_text(
+        json.dumps({"slice_id": "old-gallery", "status": "gallery"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="旧版|organ_vessel_boundary"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
 def test_gallery_writer_preserves_combined_line_and_black_ratio_quality_evidence(tmp_path):
     writer = GalleryWriter(tmp_path / "case_001", case_id="case_001")
     empty = render_sample_images(np.full((20, 20), 127, dtype=np.uint8), 10.0, 10.0, [])

@@ -38,6 +38,7 @@ class AutoCaseConfig:
     totalsegmentator_executable: str = "TotalSegmentator"
     totalsegmentator_device: str = "gpu:0"
     totalsegmentator_cache_directory: Path | None = None
+    deduplicate_degenerate_edge_angles: bool = False
 
 
 def _resolve_path(value: Any, root: Path, field: str) -> Path:
@@ -100,6 +101,17 @@ def load_auto_case_config(path: str | Path) -> AutoCaseConfig:
         if cache_value is None
         else _resolve_path(cache_value, source.parent, "totalsegmentator.cache_directory")
     )
+    square = raw.get("square", {})
+    if square is None:
+        square = {}
+    if not isinstance(square, dict):
+        raise ValueError("square 必须是 YAML 映射")
+    unexpected_square_keys = set(square) - {"deduplicate_degenerate_edge_angles"}
+    if unexpected_square_keys:
+        raise ValueError(f"自动病例 square 包含不支持的配置: {', '.join(sorted(unexpected_square_keys))}")
+    deduplicate = square.get("deduplicate_degenerate_edge_angles", False)
+    if not isinstance(deduplicate, bool):
+        raise ValueError("square.deduplicate_degenerate_edge_angles 必须是布尔值")
     series_uid = raw.get("dicom_series_uid")
     if series_uid is not None and (not isinstance(series_uid, str) or not series_uid):
         raise ValueError("dicom_series_uid 必须是非空字符串或 null")
@@ -118,6 +130,7 @@ def load_auto_case_config(path: str | Path) -> AutoCaseConfig:
         totalsegmentator_executable=executable,
         totalsegmentator_device=device,
         totalsegmentator_cache_directory=cache_directory,
+        deduplicate_degenerate_edge_angles=deduplicate,
     )
 
 
@@ -208,6 +221,7 @@ def write_auto_preprocessed_case(
     case_id: str,
     total_segmentator_metadata: Mapping[str, object],
     output_root: str = "resampling_output",
+    deduplicate_degenerate_edge_angles: bool = False,
 ) -> dict[str, object]:
     """合并门静脉、生成全部模型并写入可直接运行的内部病例 YAML。"""
 
@@ -243,6 +257,7 @@ def write_auto_preprocessed_case(
         case_id=case_id,
         output_root=output_root,
         provenance={"organ_source": "TotalSegmentator", **dict(total_segmentator_metadata)},
+        deduplicate_degenerate_edge_angles=deduplicate_degenerate_edge_angles,
     )
 
 
@@ -293,6 +308,7 @@ def prepare_auto_case(config: AutoCaseConfig) -> Path:
             "command": command,
             "command_executed": not cache_reused,
         },
+        deduplicate_degenerate_edge_angles=config.deduplicate_degenerate_edge_angles,
     )
     return Path(result["case_config_path"])
 
