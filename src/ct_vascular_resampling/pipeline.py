@@ -15,7 +15,7 @@ from PIL import Image
 import trimesh
 
 from .artifacts import write_square_samples_ply, write_surface_samples_ply
-from .config import CTConfig, CaseConfig, FilterConfig
+from .config import DEFAULT_ORGAN_COLORS, ORGAN_BOUNDARY_IDS, CTConfig, CaseConfig, FilterConfig
 from .ct_resampling import (
     CTVolume,
     diagnose_square_fov,
@@ -26,11 +26,11 @@ from .ct_resampling import (
 )
 from .fov_diagnostics import assess_rejected_fov
 from .gallery import GalleryWriter, write_rectangles_ply
-from .geometry import frame_from_vertices, intersect_mesh_with_square
+from .geometry import frame_from_vertices, intersect_mesh_with_square, mesh_bounds_may_intersect_square
 from .mesh_io import load_surface_mesh
 from .quality import evaluate_ct_quality
 from .resampling_backend import CachedCpuBackend, create_sampling_backend, validate_backend_against_cpu
-from .rendering import VesselLayer, render_sample_images
+from .rendering import OrganLayer, VesselLayer, render_sample_images
 from .sampling_pipeline import ORGAN_ORDER, SquareSample, SurfaceSamples, generate_square_samples, sample_organs
 
 
@@ -40,6 +40,15 @@ class PreparedVessel:
     label: str
     color: tuple[int, int, int]
     mesh: trimesh.Trimesh
+
+
+@dataclass(frozen=True)
+class PreparedOrgan:
+    identifier: str
+    label: str
+    color: tuple[int, int, int]
+    mesh: trimesh.Trimesh
+    bounds: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -92,6 +101,8 @@ def render_square_sample(
     ct_settings: CTConfig,
     filter_settings: FilterConfig,
     writer: GalleryWriter,
+    *,
+    organs: Iterable[PreparedOrgan] = (),
 ) -> str:
     """将一个方形同步转换为 CT、边界、特征和最终图库状态。"""
 
@@ -107,6 +118,7 @@ def render_square_sample(
         ct_settings,
         filter_settings,
         writer,
+        organs=organs,
         resampling_backend="cpu",
         volume=volume,
     )
@@ -120,6 +132,7 @@ def render_precomputed_square(
     filter_settings: FilterConfig,
     writer: GalleryWriter,
     *,
+    organs: Iterable[PreparedOrgan] = (),
     resampling_backend: str | None = None,
     volume: CTVolume | None = None,
 ) -> str:
@@ -152,7 +165,7 @@ def render_precomputed_square(
             quality,
             probe_point_world=sample.probe_point_world,
         ).to_record()
-    layers = (
+    vessel_layers = (
         [
             VesselLayer(vessel.identifier, vessel.label, vessel.color, intersect_mesh_with_square(vessel.mesh, frame))
             for vessel in vessels
@@ -160,7 +173,26 @@ def render_precomputed_square(
         if quality.accepted
         else []
     )
-    rendered = render_sample_images(ct_pixels, frame.width_mm, frame.length_mm, layers)
+    has_complete_vessel = any(contour.complete for layer in vessel_layers for contour in layer.contours)
+    organ_layers = []
+    if has_complete_vessel:
+        organ_layers = [
+            OrganLayer(
+                organ.identifier,
+                organ.label,
+                organ.color,
+                intersect_mesh_with_square(organ.mesh, frame),
+            )
+            for organ in organs
+            if mesh_bounds_may_intersect_square(organ.bounds, frame)
+        ]
+    rendered = render_sample_images(
+        ct_pixels,
+        frame.width_mm,
+        frame.length_mm,
+        vessel_layers,
+        organ_layers=organ_layers,
+    )
     return writer.write_sample(
         sample_id=sample.sample_id,
         organ=sample.organ,
@@ -253,6 +285,10 @@ def run_case(
             PreparedVessel(vessel.identifier, vessel.label, vessel.color, load_surface_mesh(vessel.path).mesh)
             for vessel in config.vessel_models
         ]
+        organs = []
+        for identifier in ORGAN_BOUNDARY_IDS:
+            mesh = load_surface_mesh(config.organ_models[identifier]).mesh
+            organs.append(PreparedOrgan(identifier, identifier, DEFAULT_ORGAN_COLORS[identifier], mesh, mesh.bounds.copy()))
         effective_workers = workers if workers is not None else config.runtime.workers
         if effective_workers < 1:
             raise ValueError("workers 必须大于零")
@@ -307,6 +343,7 @@ def run_case(
                 config.ct,
                 config.filtering,
                 writer,
+                organs=organs,
                 resampling_backend=backend_name,
                 volume=volume,
             )
@@ -324,6 +361,7 @@ def run_case(
                 config.ct,
                 config.filtering,
                 writer,
+                organs=organs,
                 resampling_backend=backend.name,
                 volume=volume,
             )
@@ -381,6 +419,7 @@ def run_case(
     if "index" in selected:
         gallery_manifest = case_directory / "gallery" / "gallery.jsonl"
         label_counts: Counter[str] = Counter()
+        organ_label_counts: Counter[str] = Counter()
         if gallery_manifest.is_file():
             from .registration_adapter import load_gallery_database
 
@@ -388,6 +427,10 @@ def run_case(
             indexed_feature_count = len(database.features)
             for feature in database.features:
                 label_counts.update(str(triplet.label) for triplet in feature.triplets)
+            with gallery_manifest.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        organ_label_counts.update(set(json.loads(line).get("organ_labels", [])))
         _write_json_atomic(
             case_directory / "library_summary.json",
             {
@@ -396,6 +439,10 @@ def run_case(
                 "gallery_manifest_exists": gallery_manifest.is_file(),
                 "indexed_feature_count": indexed_feature_count,
                 "feature_label_counts": dict(sorted(label_counts.items())),
+                "organ_label_counts": dict(sorted(organ_label_counts.items())),
+                "organ_boundary_colors": {
+                    identifier: list(DEFAULT_ORGAN_COLORS[identifier]) for identifier in ORGAN_BOUNDARY_IDS
+                },
             },
         )
     return RunSummary(config.case_id, sampled_counts, len(samples), dict(statuses), False, indexed_feature_count)

@@ -19,6 +19,7 @@ from ct_vascular_resampling.config import (
 )
 from ct_vascular_resampling.ct_resampling import CTVolume, diagnose_square_fov
 from ct_vascular_resampling.gallery import GalleryWriter
+import ct_vascular_resampling.pipeline as pipeline_module
 from ct_vascular_resampling.pipeline import PreparedVessel, render_precomputed_square, render_square_sample, run_case
 from ct_vascular_resampling.resampling_backend import CachedCpuBackend
 from ct_vascular_resampling.sampling_pipeline import SquareSample, SurfaceSamples
@@ -29,6 +30,8 @@ def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):
     volume = CTVolume.from_sitk(image)
     vessel_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
     vessel_mesh.apply_translation((7.0, 7.0, 5.0))
+    organ_mesh = trimesh.creation.box(extents=(4.0, 4.0, 4.0))
+    organ_mesh.apply_translation((7.0, 7.0, 5.0))
     sample = SquareSample(
         sample_id="stomach-000000-x-00",
         organ="stomach",
@@ -45,10 +48,14 @@ def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):
         CTConfig(output_resolution=20),
         FilterConfig(),
         writer,
+        organs=[pipeline_module.PreparedOrgan("liver", "liver", (140, 86, 75), organ_mesh, organ_mesh.bounds)],
     )
 
     assert status == "gallery"
     assert (tmp_path / "case" / "gallery" / "ct_overlay" / "stomach-000000-x-00.png").is_file()
+    assert (tmp_path / "case" / "gallery" / "organ_vessel_boundary" / "stomach-000000-x-00.png").is_file()
+    record = json.loads((tmp_path / "case" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8"))
+    assert record["organ_labels"] == ["liver"]
 
 
 def test_precomputed_square_writes_the_same_gallery_artifacts(tmp_path):
@@ -87,6 +94,7 @@ def test_rejected_precomputed_square_skips_vessel_intersection(monkeypatch, tmp_
         vertices=np.asarray([[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]),
     )
     vessel_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    organ_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
     writer = GalleryWriter(tmp_path / "case", "case")
 
     def unexpected_intersection(*_):
@@ -101,10 +109,43 @@ def test_rejected_precomputed_square_skips_vessel_intersection(monkeypatch, tmp_
         CTConfig(output_resolution=20),
         FilterConfig(),
         writer,
+        organs=[pipeline_module.PreparedOrgan("liver", "liver", (140, 86, 75), organ_mesh, organ_mesh.bounds)],
         resampling_backend="cpu",
     )
 
     assert status == "rejected"
+
+
+def test_unindexed_precomputed_square_skips_organ_intersection(monkeypatch, tmp_path):
+    sample = SquareSample(
+        sample_id="stomach-000000-x-00",
+        organ="stomach",
+        probe_point_world=np.asarray([7.0, 7.0, 5.0]),
+        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
+        vertices=np.asarray([[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]),
+    )
+    organ_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    writer = GalleryWriter(tmp_path / "case", "case")
+
+    def unexpected_intersection(*_):
+        raise AssertionError("unindexed samples must skip organ mesh intersections")
+
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.intersect_mesh_with_square", unexpected_intersection)
+
+    status = render_precomputed_square(
+        sample,
+        np.full((20, 20), 40.0, dtype=np.float32),
+        [],
+        CTConfig(output_resolution=20),
+        FilterConfig(),
+        writer,
+        organs=[pipeline_module.PreparedOrgan("liver", "liver", (140, 86, 75), organ_mesh, organ_mesh.bounds)],
+        resampling_backend="cpu",
+    )
+
+    assert status == "unindexed"
+    record = json.loads((tmp_path / "case" / "unindexed" / "unindexed.jsonl").read_text(encoding="utf-8"))
+    assert "organ_labels" not in record
 
 
 def test_out_of_fov_square_writes_black_filled_ct_only(monkeypatch, tmp_path):
@@ -297,6 +338,8 @@ class HMMPoseEstimator:
     assert library_summary["case_id"] == "case_001"
     assert library_summary["indexed_feature_count"] == completed.indexed_feature_count
     assert library_summary["gallery_manifest"] == "gallery/gallery.jsonl"
+    assert set(library_summary["organ_boundary_colors"]) == set(pipeline_module.ORGAN_BOUNDARY_IDS)
+    assert set(library_summary["organ_label_counts"]).issubset(set(pipeline_module.ORGAN_BOUNDARY_IDS))
 
     class OffsetBackend:
         name = "gpu:0"

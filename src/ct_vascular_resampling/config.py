@@ -47,6 +47,32 @@ DEFAULT_VESSEL_COLORS = {
     "artery": (255, 82, 0),
     "vein": (0, 188, 212),
 }
+ORGAN_BOUNDARY_IDS = (
+    "adrenal_gland_left",
+    "adrenal_gland_right",
+    "duodenum",
+    "esophagus",
+    "gallbladder",
+    "kidney_left",
+    "kidney_right",
+    "liver",
+    "pancreas",
+    "spleen",
+    "stomach",
+)
+DEFAULT_ORGAN_COLORS = {
+    "adrenal_gland_left": (31, 119, 180),
+    "adrenal_gland_right": (174, 199, 232),
+    "duodenum": (44, 160, 44),
+    "esophagus": (152, 223, 138),
+    "gallbladder": (188, 189, 34),
+    "kidney_left": (214, 39, 40),
+    "kidney_right": (255, 152, 150),
+    "liver": (140, 86, 75),
+    "pancreas": (148, 103, 189),
+    "spleen": (227, 119, 194),
+    "stomach": (127, 127, 127),
+}
 
 
 @dataclass(frozen=True)

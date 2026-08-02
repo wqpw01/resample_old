@@ -60,7 +60,18 @@ class GalleryWriter:
                     continue
                 try:
                     record = json.loads(line)
-                    completed[str(record["slice_id"])] = str(record["status"])
+                    sample_id = str(record["slice_id"])
+                    status = str(record["status"])
+                    if status == "gallery":
+                        combined_path = record.get("organ_vessel_boundary_png")
+                        organ_labels = record.get("organ_labels")
+                        if not isinstance(combined_path, str) or not isinstance(organ_labels, list):
+                            raise ValueError(
+                                "检测到旧版 gallery 记录，缺少 organ_vessel_boundary_png 或 organ_labels；请使用新的输出目录"
+                            )
+                        if not (self.case_directory / "gallery" / combined_path).is_file():
+                            raise ValueError(f"gallery 组合图不存在: {combined_path}")
+                    completed[sample_id] = status
                 except (json.JSONDecodeError, KeyError) as error:
                     raise ValueError(f"全量清单第 {line_number} 行损坏: {error}") from error
         return completed
@@ -186,6 +197,9 @@ class GalleryWriter:
         self._save_png(rendered.ct, ct_path)
         self._save_png(rendered.boundary_only, boundary_path)
         self._save_png(rendered.ct_overlay, overlay_path)
+        combined_path = root / "organ_vessel_boundary" / f"{sample_id}.png"
+        if status == "gallery":
+            self._save_png(rendered.organ_vessel_boundary, combined_path)
         width_px, height_px = rendered.ct.size
         record = {
             "frame_id": self.case_id,
@@ -220,6 +234,9 @@ class GalleryWriter:
                 "line_segment_px": list(quality.line_segment_px) if quality.line_segment_px is not None else None,
             },
         }
+        if status == "gallery":
+            record["organ_vessel_boundary_png"] = str(combined_path.relative_to(root))
+            record["organ_labels"] = rendered.organ_labels
         if resampling_backend is not None:
             record["resampling_backend"] = resampling_backend
         if fov_diagnostics is not None:

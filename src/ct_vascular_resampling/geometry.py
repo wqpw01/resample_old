@@ -34,6 +34,36 @@ class SectionContour:
     area_mm2: float
 
 
+def mesh_bounds_may_intersect_square(bounds: np.ndarray, frame: SquareFrame, tolerance: float = 1e-8) -> bool:
+    """保守判断轴对齐网格包围盒是否可能与有限方形相交。"""
+
+    values = np.asarray(bounds, dtype=np.float64)
+    if values.shape != (2, 3) or not np.all(np.isfinite(values)) or np.any(values[0] > values[1]):
+        raise ValueError("bounds 必须是有限且有序的 2x3 数组")
+    lower, upper = values
+    corners = np.asarray(
+        [
+            [x, y, z]
+            for x in (lower[0], upper[0])
+            for y in (lower[1], upper[1])
+            for z in (lower[2], upper[2])
+        ],
+        dtype=np.float64,
+    )
+    offsets = corners - frame.vertices[0]
+    plane_distances = offsets @ frame.normal
+    if np.min(plane_distances) > tolerance or np.max(plane_distances) < -tolerance:
+        return False
+    u_values = offsets @ frame.u_axis
+    v_values = offsets @ frame.v_axis
+    return not (
+        np.max(u_values) < -tolerance
+        or np.min(u_values) > frame.width_mm + tolerance
+        or np.max(v_values) < -tolerance
+        or np.min(v_values) > frame.length_mm + tolerance
+    )
+
+
 def frame_from_vertices(vertices: np.ndarray) -> SquareFrame:
     """将 V1,V2,V3,V4 构造成局部二维方形坐标系。"""
 

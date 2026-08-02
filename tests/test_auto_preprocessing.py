@@ -113,6 +113,7 @@ def test_auto_preprocessing_merges_legacy_portal_and_ignores_unconfigured_organ_
     config = yaml.safe_load((tmp_path / "case_preprocessed.yaml").read_text(encoding="utf-8"))
     assert result["model_count"] == 16
     assert [item["label"] for item in config["vessel_models"]] == ["artery", "vein"]
+    assert config["square"]["deduplicate_degenerate_edge_angles"] is True
 
 
 def test_totalsegmentator_command_requests_only_required_organs(tmp_path):

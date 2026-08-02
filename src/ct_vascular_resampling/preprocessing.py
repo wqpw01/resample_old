@@ -125,7 +125,7 @@ def _case_config(case_id: str, registration_module_path: Path, output_root: str 
             "stomach_search_distance_mm": 10.0,
             "stomach_voxel_pitch_mm": 1.0,
         },
-        "square": {"side_length_mm": 100.0},
+        "square": {"side_length_mm": 100.0, "deduplicate_degenerate_edge_angles": True},
         "ct": {"output_resolution": 300, "window_level": 40.0, "window_width": 400.0, "fill_hu_value": -1000.0},
         "filtering": {
             "black_threshold": 50,

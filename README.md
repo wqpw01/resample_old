@@ -41,7 +41,7 @@ ct_vascular_resampling/
 - `preprocessing.py`：校验 Size、Spacing、Origin、Direction；提取二值掩膜，使用 Marching Cubes 导出物理空间网格，并写出预处理清单和内部病例配置。
 - `sampling.py`、`sampling_pipeline.py`、`squares.py`：器官表面候选筛选、固定随机种子的 FPS、100 mm x 100 mm 方形采样面及 27 个局部姿态。
 - `ct_resampling.py`、`resampling_backend.py`：按世界坐标对 CT 插值，提供参考 CPU 与经校验的可选 GPU 后端。
-- `rendering.py`：生成 CT 图、仅血管边界图和叠加图。
+- `rendering.py`：生成 CT 图、仅血管边界图、CT 血管叠加图和器官/血管组合边界图。
 - `quality.py`：按黑色区域占比和直线黑边筛选不合格图像。
 - `gallery.py`、`artifacts.py`：将样本写入 `gallery/`、`rejected/`、`unindexed/`，并生成 JSONL 清单和检索库摘要。
 - `registration_adapter.py`：读取 `gallery.jsonl`，恢复 `2021.py` 可直接使用的检索对象。
@@ -50,7 +50,11 @@ ct_vascular_resampling/
 
 ### 重采样结果与检索入口
 
-一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录检索特征统计，`run_metadata.json` 记录后端、运行信息和 `excluded_fov_count`。
+一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录血管特征统计、器官标签计数和器官颜色图例，`run_metadata.json` 记录后端、运行信息和 `excluded_fov_count`。
+
+每个 gallery 帧继续生成 `ct/`、白底仅血管 `boundary_only/` 和 CT 血管叠加 `ct_overlay/`，并新增白底 `organ_vessel_boundary/`：11 类非血管器官先按固定颜色绘制，血管再按原配置颜色覆盖绘制。对应 JSONL 记录新增 `organ_vessel_boundary_png` 和排序去重的 `organ_labels`；器官标签不写入血管 `features`，因此不改变图库状态或 `2021.py` 的血管检索语义。`unindexed`、`rejected` 和 `excluded_fov` 不生成该图，也不写这两个字段。
+
+断点恢复会检查每条已完成 gallery 记录的新字段和组合图。旧图库缺少这些产物时会明确报错，必须改用新的输出目录全量重建；不会在旧清单上静默追加或混合两种输出协议。
 
 供 `2021.py` 检索时只加载 `gallery/gallery.jsonl`；`registration_adapter.load_gallery_database()` 会将其中的特征和方位转换为 `FeatureVector`、`VesselTriplet` 与 `ProbePose`，无需将 JSONL 转换为另一种文件格式。
 

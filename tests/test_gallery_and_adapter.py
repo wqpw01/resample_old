@@ -4,12 +4,13 @@ import json
 
 import numpy as np
 from PIL import Image
+import pytest
 
 from ct_vascular_resampling.gallery import GalleryWriter, write_rectangles_ply
 from ct_vascular_resampling.geometry import frame_from_vertices
 from ct_vascular_resampling.quality import QualityResult
 from ct_vascular_resampling.registration_adapter import load_gallery_database
-from ct_vascular_resampling.rendering import VesselLayer, render_sample_images
+from ct_vascular_resampling.rendering import OrganLayer, VesselLayer, render_sample_images
 from ct_vascular_resampling.geometry import SectionContour
 
 
@@ -29,6 +30,7 @@ def _rendered():
         10.0,
         10.0,
         [VesselLayer("portal_tree", "portal", (255, 0, 255), [contour])],
+        organ_layers=[OrganLayer("liver", "liver", (140, 86, 75), [contour])],
     )
 
 
@@ -46,9 +48,12 @@ def test_gallery_writer_routes_featured_sample_to_gallery_with_compatible_record
 
     assert status == "gallery"
     assert (tmp_path / "case_001" / "gallery" / "ct" / "stomach-000001.png").is_file()
+    assert (tmp_path / "case_001" / "gallery" / "organ_vessel_boundary" / "stomach-000001.png").is_file()
     record = json.loads((tmp_path / "case_001" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8"))
     assert record["features"][0]["label"] == "portal"
     assert record["ct_png"] == "ct/stomach-000001.png"
+    assert record["organ_vessel_boundary_png"] == "organ_vessel_boundary/stomach-000001.png"
+    assert record["organ_labels"] == ["liver"]
     assert record["pixel_spacing_mm"] == [10.0 / 19.0, 10.0 / 19.0]
     assert writer.completed_status("stomach-000001") == "gallery"
 
@@ -60,6 +65,11 @@ def test_gallery_writer_routes_empty_and_rejected_samples_to_separate_directorie
     assert writer.write_sample("bad", "liver", np.zeros(3), np.array([0.0, 0.0, 1.0]), _frame(), empty, QualityResult(False, "black_ratio", 0.31)) == "rejected"
     assert (tmp_path / "case_001" / "unindexed" / "unindexed.jsonl").is_file()
     assert (tmp_path / "case_001" / "rejected" / "rejected.jsonl").is_file()
+    for status, sample_id in (("unindexed", "empty"), ("rejected", "bad")):
+        record = json.loads((tmp_path / "case_001" / status / f"{status}.jsonl").read_text(encoding="utf-8"))
+        assert "organ_vessel_boundary_png" not in record
+        assert "organ_labels" not in record
+        assert not (tmp_path / "case_001" / status / "organ_vessel_boundary" / f"{sample_id}.png").exists()
 
 
 def test_gallery_writer_persists_fov_exclusion_with_ct_only(tmp_path):
@@ -89,10 +99,24 @@ def test_gallery_writer_persists_fov_exclusion_with_ct_only(tmp_path):
     assert record["resampling_backend"] == "cpu"
     assert "boundary_only_png" not in record
     assert "ct_overlay_png" not in record
+    assert "organ_vessel_boundary_png" not in record
+    assert "organ_labels" not in record
     with Image.open(ct_path) as saved:
         assert saved.mode == "L"
         assert np.all(np.asarray(saved) == 91)
     assert GalleryWriter(case_directory, case_id="case_001").completed_status("esophagus-000010-x-01") == "excluded_fov"
+
+
+def test_gallery_writer_rejects_resume_from_gallery_without_organ_artifacts(tmp_path):
+    case_directory = tmp_path / "case_001"
+    case_directory.mkdir()
+    (case_directory / "manifest.jsonl").write_text(
+        json.dumps({"slice_id": "old-gallery", "status": "gallery"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="旧版|organ_vessel_boundary"):
+        GalleryWriter(case_directory, case_id="case_001")
 
 
 def test_gallery_writer_preserves_combined_line_and_black_ratio_quality_evidence(tmp_path):
