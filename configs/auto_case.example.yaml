@@ -1,13 +1,13 @@
-# 自动病例入口：病例影像输入只有 CT 与一份三类血管标签图。
+# 自动病例入口：病例影像输入只有 CT 与一份可混合包含器官、血管标签的标签体。
 case_id: case_001
 ct_path: ../data/case_001/ct.nrrd
-vascular_segmentation_path: ../data/case_001/vessels.nrrd
+vascular_segmentation_path: ../data/case_001/labels.nrrd
 
-# 每个病例必须显式给出数值标签；portal 会自动并入 vein。
+# 只提取这里配置的动静脉标签，标签体中的其他标签全部忽略。
+# 旧配置可额外提供 portal，其标签会自动并入 vein。
 vessel_label_values:
   artery: [1]
-  vein: [2]
-  portal: [3]
+  vein: [2, 3]
 
 # 既有检索引擎代码依赖，不属于病例影像输入。
 registration_module_path: ../registration/2021.py
@@ -19,3 +19,5 @@ dicom_series_uid: null
 totalsegmentator:
   executable: TotalSegmentator
   device: gpu:0
+  # 可选；相对路径按本配置文件目录解析。缓存无效时会在此目录重新生成。
+  # cache_directory: ../cache/case_001/totalsegmentator

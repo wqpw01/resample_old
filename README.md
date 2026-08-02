@@ -31,13 +31,13 @@ ct_vascular_resampling/
 ### 配置、兼容引擎与脚本
 
 - `configs/case.example.yaml`：已有 CT、器官网格、血管网格时的标准病例配置模板。
-- `configs/auto_case.example.yaml`：只有 CT 与一份三类血管标签图时的模板。需填写 artery、vein、portal 的数值标签；portal 会自动合并至 `vein_tree`。
+- `configs/auto_case.example.yaml`：只有 CT 与一份混合 NRRD/NIfTI 标签体时的模板。只需填写 artery、vein 的数值标签；旧配置可保留 portal，它会自动合并至 `vein_tree`。
 - `registration/2021.py`：兼容检索引擎，提供 `FeatureVector`、`VesselTriplet`、`ProbePose`、`MultiLabelledCBIR` 和 `HMMPoseEstimator`。
 - `scripts/preprocess_slicer_case.py`：从 DICOM CT 与 3D Slicer `.seg.nrrd` 提取对齐掩膜、导出 NRRD 与物理空间 PLY 网格，并生成可运行的内部病例 YAML。
 
 ### 主程序模块
 
-- `auto_preprocessing.py`：读取 CT 与三类血管标签图，调用 TotalSegmentator 生成器官掩膜和 PLY；输出 `artery_tree`，并将 vein 与 portal 合并为 `vein_tree`。
+- `auto_preprocessing.py`：读取 CT 与混合标签体，只提取配置的动静脉标签，并调用或复用 TotalSegmentator 生成器官掩膜和 PLY；旧配置中的 portal 会并入 `vein_tree`。
 - `preprocessing.py`：校验 Size、Spacing、Origin、Direction；提取二值掩膜，使用 Marching Cubes 导出物理空间网格，并写出预处理清单和内部病例配置。
 - `sampling.py`、`sampling_pipeline.py`、`squares.py`：器官表面候选筛选、固定随机种子的 FPS、100 mm x 100 mm 方形采样面及 27 个局部姿态。
 - `ct_resampling.py`、`resampling_backend.py`：按世界坐标对 CT 插值，提供参考 CPU 与经校验的可选 GPU 后端。
@@ -100,13 +100,15 @@ python scripts/extract_fov_boundary_samples.py \
 
 ## 自动器官预处理
 
-自动病例入口只接收 CT 和一份含动脉、静脉、门静脉的 NRRD/NIfTI 血管标签图。它调用 TotalSegmentator 的 `total` 任务生成源采样规则所需器官掩膜与物理空间 PLY 网格；门静脉会与静脉合并为 `vein_tree`。病例配置可从 `configs/auto_case.example.yaml` 开始：
+自动病例入口只接收 CT 和一份可同时包含器官、血管标签的 NRRD/NIfTI 标签体。`vessel_label_values` 只配置 `artery` 和 `vein`，例如 `artery: [1]`、`vein: [2, 3]`；未配置的器官或其他数值标签全部忽略。旧三键配置仍可额外提供 `portal`，其标签会先并入 `vein`。器官始终来自 TotalSegmentator 的 `total` 任务，不从上传标签体提取。病例配置可从 `configs/auto_case.example.yaml` 开始：
 
 ```bash
 python main.py --auto-case-config configs/auto_case.yaml --backend auto
 ```
 
-`registration_module_path` 是既有 `2021.py` 检索引擎代码路径，不属于病例影像输入。首次运行会下载 TotalSegmentator 权重。建议在运行前设置 `TOTALSEG_HOME_DIR` 到持久磁盘路径；已有权重缓存可直接复用。GPU 环境使用 `environment.totalseg.gpu.yml` 创建；自动输出位于 `<output_root>/<case_id>/preprocessing/`，原有 `gallery/`、`rejected/`、`unindexed/` 及 JSONL 输出不变。
+`totalsegmentator.cache_directory` 可指向已有分割目录，相对路径按自动病例 YAML 所在目录解析。程序仅在 14 个必需掩膜全部存在、非空，且 Size、Spacing、Origin、Direction 均与 CT 一致时跳过 TotalSegmentator；缓存缺失或无效时会向该目录重新生成并再次严格校验。未配置时仍使用 `<output_root>/<case_id>/preprocessing/totalsegmentator/`。预处理 `manifest.json` 的 provenance 会记录实际 `cache_directory`、`cache_reused`、计划命令及 `command_executed`。
+
+`registration_module_path` 是既有 `2021.py` 检索引擎代码路径，不属于病例影像输入。首次运行会下载 TotalSegmentator 权重。建议在运行前设置 `TOTALSEG_HOME_DIR` 到持久磁盘路径；这与上述分割掩膜缓存相互独立。GPU 环境使用 `environment.totalseg.gpu.yml` 创建；自动输出位于 `<output_root>/<case_id>/preprocessing/`，原有 `gallery/`、`rejected/`、`unindexed/` 及 JSONL 输出不变。
 
 ## 二维裁剪标签检索特征
 
