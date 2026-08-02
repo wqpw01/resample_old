@@ -217,6 +217,8 @@ def test_auto_preprocessing_propagates_explicit_degenerate_angle_deduplication(t
         pytest.param({"artery": [1], "vein": [2], "organ": [3]}, id="unknown-key"),
         pytest.param({"artery": [], "vein": [2]}, id="empty-list"),
         pytest.param({"artery": [-1], "vein": [2]}, id="negative-value"),
+        pytest.param({"artery": [0], "vein": [2]}, id="background-value"),
+        pytest.param({"artery": [True], "vein": [2]}, id="boolean-value"),
         pytest.param({"artery": [1], "vein": [1]}, id="artery-vein-overlap"),
         pytest.param({"artery": [1], "vein": [2], "portal": [1]}, id="artery-portal-overlap"),
         pytest.param({"artery": [1], "vein": [2], "portal": [2]}, id="vein-portal-overlap"),

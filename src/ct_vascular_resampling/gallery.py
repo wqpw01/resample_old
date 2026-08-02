@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Iterable
 import numpy as np
 from PIL import Image
 
+from .config import ORGAN_BOUNDARY_IDS
 from .geometry import SquareFrame
 from .quality import QualityResult
 from .rendering import RenderedSample
@@ -18,6 +20,11 @@ from .rendering import RenderedSample
 
 def _vector(value: np.ndarray) -> list[float]:
     return [float(item) for item in np.asarray(value, dtype=np.float64)]
+
+
+def _record_digest(record: dict) -> bytes:
+    canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).digest()
 
 
 def write_rectangles_ply(path: str | Path, frames: Iterable[SquareFrame]) -> None:
@@ -49,7 +56,6 @@ class GalleryWriter:
         self.case_directory.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         self.completed_statuses = self._load_completed_statuses()
-        self._validate_gallery_manifest()
 
     def _validate_gallery_record(self, record: dict) -> None:
         combined_path = record.get("organ_vessel_boundary_png")
@@ -58,34 +64,57 @@ class GalleryWriter:
             raise ValueError(
                 "检测到旧版 gallery 记录，缺少 organ_vessel_boundary_png 或 organ_labels；请使用新的输出目录"
             )
+        if (
+            any(not isinstance(label, str) or label not in ORGAN_BOUNDARY_IDS for label in organ_labels)
+            or organ_labels != sorted(set(organ_labels))
+        ):
+            raise ValueError("gallery organ_labels 必须是 11 类器官中排序去重后的字符串列表")
         if not (self.case_directory / "gallery" / combined_path).is_file():
             raise ValueError(f"gallery 组合图不存在: {combined_path}")
 
-    def _validate_gallery_manifest(self) -> None:
-        gallery_manifest = self.case_directory / "gallery" / "gallery.jsonl"
-        if not gallery_manifest.is_file():
-            return
-        with gallery_manifest.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    record = json.loads(line)
-                    self._validate_gallery_record(record)
-                except json.JSONDecodeError as error:
-                    raise ValueError(f"gallery 清单第 {line_number} 行损坏: {error}") from error
+    def _state_manifest_paths(self) -> dict[str, Path]:
+        return {
+            "gallery": self.case_directory / "gallery" / "gallery.jsonl",
+            "unindexed": self.case_directory / "unindexed" / "unindexed.jsonl",
+            "rejected": self.case_directory / "rejected" / "rejected.jsonl",
+            "excluded_fov": self.case_directory / "excluded_fov.jsonl",
+        }
+
+    def _load_state_manifest_entries(self, paths: dict[str, Path]) -> dict[str, tuple[str, bytes]]:
+        entries: dict[str, tuple[str, bytes]] = {}
+        for status, path in paths.items():
+            if not path.is_file():
+                continue
+            with path.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                        sample_id = str(record["slice_id"])
+                        record_status = str(record["status"])
+                        if record_status != status:
+                            raise ValueError(f"记录状态应为 {status}，实际为 {record_status}")
+                        if status == "gallery":
+                            self._validate_gallery_record(record)
+                        if sample_id in entries:
+                            previous_status = entries[sample_id][0]
+                            raise ValueError(
+                                f"slice_id 重复或属于多个状态: {sample_id} ({previous_status}, {status})"
+                            )
+                        entries[sample_id] = (status, _record_digest(record))
+                    except (json.JSONDecodeError, KeyError, ValueError) as error:
+                        raise ValueError(f"{status} 清单第 {line_number} 行损坏: {error}") from error
+        return entries
 
     def _load_completed_statuses(self) -> dict[str, str]:
+        state_manifest_paths = self._state_manifest_paths()
         if not self.manifest_path.is_file():
-            state_manifests = (
-                self.case_directory / "gallery" / "gallery.jsonl",
-                self.case_directory / "unindexed" / "unindexed.jsonl",
-                self.case_directory / "rejected" / "rejected.jsonl",
-                self.case_directory / "excluded_fov.jsonl",
-            )
-            if any(path.is_file() and path.stat().st_size > 0 for path in state_manifests):
+            if any(path.is_file() and path.stat().st_size > 0 for path in state_manifest_paths.values()):
                 raise ValueError("检测到状态清单但缺少根 manifest.jsonl；请使用完整的新输出目录")
             return {}
+        state_entries = self._load_state_manifest_entries(state_manifest_paths)
+        root_entries: dict[str, tuple[str, bytes]] = {}
         completed: dict[str, str] = {}
         with self.manifest_path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -95,11 +124,35 @@ class GalleryWriter:
                     record = json.loads(line)
                     sample_id = str(record["slice_id"])
                     status = str(record["status"])
+                    if status not in state_manifest_paths:
+                        raise ValueError(f"不支持的样本状态: {status}")
                     if status == "gallery":
                         self._validate_gallery_record(record)
+                    if sample_id in root_entries:
+                        previous_status = root_entries[sample_id][0]
+                        raise ValueError(
+                            f"slice_id 重复或属于多个状态: {sample_id} ({previous_status}, {status})"
+                        )
+                    digest = _record_digest(record)
+                    state_entry = state_entries.get(sample_id)
+                    if state_entry is None:
+                        self._append_jsonl(state_manifest_paths[status], record)
+                        state_entries[sample_id] = (status, digest)
+                    elif state_entry[0] != status:
+                        raise ValueError(
+                            f"slice_id 属于多个状态: {sample_id} ({status}, {state_entry[0]})"
+                        )
+                    elif state_entry[1] != digest:
+                        raise ValueError(f"根 manifest 与 {status} 清单的记录内容不一致: {sample_id}")
+                    root_entries[sample_id] = (status, digest)
                     completed[sample_id] = status
-                except (json.JSONDecodeError, KeyError) as error:
+                except (json.JSONDecodeError, KeyError, ValueError) as error:
                     raise ValueError(f"全量清单第 {line_number} 行损坏: {error}") from error
+        orphaned = state_entries.keys() - root_entries.keys()
+        if orphaned:
+            sample_id = min(orphaned)
+            status = state_entries[sample_id][0]
+            raise ValueError(f"{status} 清单包含根 manifest.jsonl 未记录的样本: {sample_id}")
         return completed
 
     @staticmethod

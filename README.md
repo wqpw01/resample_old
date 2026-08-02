@@ -114,7 +114,7 @@ python main.py --auto-case-config configs/auto_case.yaml --backend auto
 
 自动配置可通过 `square.deduplicate_degenerate_edge_angles` 显式控制退化角去重；省略时为 `false`，因此不会暗中改变既有采样集合。正式全量病例应在配置中明确记录所选值。
 
-`registration_module_path` 是既有 `2021.py` 检索引擎代码路径，不属于病例影像输入。首次运行会下载 TotalSegmentator 权重。建议在运行前设置 `TOTALSEG_HOME_DIR` 到持久磁盘路径；这与上述分割掩膜缓存相互独立。GPU 环境使用 `environment.totalseg.gpu.yml` 创建；自动输出位于 `<output_root>/<case_id>/preprocessing/`，原有 `gallery/`、`rejected/`、`unindexed/` 及 JSONL 输出不变。
+`registration_module_path` 是既有 `2021.py` 检索引擎代码路径，不属于病例影像输入。首次运行会下载 TotalSegmentator 权重。建议在运行前设置 `TOTALSEG_HOME_DIR` 到持久磁盘路径；这与上述分割掩膜缓存相互独立。GPU 环境使用 `environment.totalseg.gpu.yml` 创建；自动输出位于 `<output_root>/<case_id>/preprocessing/`，原有 `gallery/`、`rejected/`、`unindexed/` 目录骨架保持兼容，gallery JSONL 按上文新增器官字段。
 
 ## 二维裁剪标签检索特征
 

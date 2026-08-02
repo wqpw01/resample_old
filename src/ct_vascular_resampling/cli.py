@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="无 P/N/D 的 CT 血管模型重采样与检索图库构建")
     config_group = parser.add_mutually_exclusive_group(required=True)
     config_group.add_argument("--case-config", help="已具备器官网格的病例 YAML 配置")
-    config_group.add_argument("--auto-case-config", help="CT、三类血管标签图与 TotalSegmentator 自动预处理配置")
+    config_group.add_argument("--auto-case-config", help="CT、混合标签体与 TotalSegmentator 自动预处理配置")
     config_group.add_argument("--rejected-audit-config", help="既有 rejected 图库的 CT FOV 审计 YAML 配置")
     parser.add_argument("--steps", nargs="+", choices=["all", "sample", "square", "render", "filter", "index"], default=["all"])
     parser.add_argument("--dry-run", action="store_true", help="仅统计候选，不写入任何文件")

@@ -149,6 +149,150 @@ def test_gallery_writer_rejects_old_record_found_only_in_gallery_manifest(tmp_pa
         GalleryWriter(case_directory, case_id="case_001")
 
 
+def test_gallery_writer_repairs_root_record_when_state_manifest_append_was_interrupted(tmp_path, monkeypatch):
+    case_directory = tmp_path / "case_001"
+    writer = GalleryWriter(case_directory, case_id="case_001")
+    original_append = GalleryWriter._append_jsonl
+    calls = 0
+
+    def interrupt_second_append(path, record):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated interruption after root manifest append")
+        original_append(path, record)
+
+    monkeypatch.setattr(GalleryWriter, "_append_jsonl", staticmethod(interrupt_second_append))
+    with pytest.raises(OSError, match="simulated interruption"):
+        writer.write_sample(
+            "interrupted-gallery",
+            "stomach",
+            np.zeros(3),
+            np.array([0.0, 0.0, 1.0]),
+            _frame(),
+            _rendered(),
+            QualityResult(True, None, 0.0),
+        )
+
+    monkeypatch.setattr(GalleryWriter, "_append_jsonl", staticmethod(original_append))
+    resumed = GalleryWriter(case_directory, case_id="case_001")
+
+    assert resumed.completed_status("interrupted-gallery") == "gallery"
+    gallery_records = [
+        json.loads(line)
+        for line in (case_directory / "gallery" / "gallery.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [record["slice_id"] for record in gallery_records] == ["interrupted-gallery"]
+    root_records = [
+        json.loads(line)
+        for line in (case_directory / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [record["slice_id"] for record in root_records] == ["interrupted-gallery"]
+
+
+@pytest.mark.parametrize(
+    "organ_labels",
+    [
+        pytest.param(["liver", "liver"], id="duplicate"),
+        pytest.param(["stomach", "liver"], id="unsorted"),
+        pytest.param(["aorta"], id="unsupported"),
+        pytest.param([1], id="non-string"),
+    ],
+)
+def test_gallery_writer_rejects_invalid_organ_labels_on_resume(tmp_path, organ_labels):
+    case_directory = tmp_path / "case_001"
+    combined_path = case_directory / "gallery" / "organ_vessel_boundary" / "sample.png"
+    combined_path.parent.mkdir(parents=True)
+    Image.new("RGB", (20, 20), "white").save(combined_path)
+    record = {
+        "slice_id": "sample",
+        "status": "gallery",
+        "organ_vessel_boundary_png": "organ_vessel_boundary/sample.png",
+        "organ_labels": organ_labels,
+    }
+    serialized = json.dumps(record) + "\n"
+    (case_directory / "manifest.jsonl").write_text(serialized, encoding="utf-8")
+    (case_directory / "gallery" / "gallery.jsonl").write_text(serialized, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="organ_labels"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
+def test_gallery_writer_rejects_state_record_missing_from_root_manifest(tmp_path):
+    case_directory = tmp_path / "case_001"
+    case_directory.mkdir()
+    (case_directory / "manifest.jsonl").write_text(
+        json.dumps({"slice_id": "known", "status": "unindexed"}) + "\n",
+        encoding="utf-8",
+    )
+    unindexed_directory = case_directory / "unindexed"
+    unindexed_directory.mkdir()
+    (unindexed_directory / "unindexed.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"slice_id": "known", "status": "unindexed"}),
+                json.dumps({"slice_id": "orphan", "status": "unindexed"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="根 manifest|orphan"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
+def test_gallery_writer_rejects_duplicate_state_manifest_records(tmp_path):
+    case_directory = tmp_path / "case_001"
+    case_directory.mkdir()
+    record = {"slice_id": "duplicate", "status": "unindexed"}
+    serialized = json.dumps(record) + "\n"
+    (case_directory / "manifest.jsonl").write_text(serialized, encoding="utf-8")
+    unindexed_directory = case_directory / "unindexed"
+    unindexed_directory.mkdir()
+    (unindexed_directory / "unindexed.jsonl").write_text(serialized * 2, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="重复|duplicate"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
+def test_gallery_writer_rejects_slice_id_in_multiple_root_statuses(tmp_path):
+    case_directory = tmp_path / "case_001"
+    case_directory.mkdir()
+    root_records = [
+        {"slice_id": "conflict", "status": "unindexed"},
+        {"slice_id": "conflict", "status": "rejected"},
+    ]
+    (case_directory / "manifest.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in root_records),
+        encoding="utf-8",
+    )
+    for record in root_records:
+        status = record["status"]
+        directory = case_directory / status
+        directory.mkdir()
+        (directory / f"{status}.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="重复|多个状态|conflict"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
+def test_gallery_writer_rejects_mismatched_root_and_state_records(tmp_path):
+    case_directory = tmp_path / "case_001"
+    case_directory.mkdir()
+    root_record = {"slice_id": "mismatch", "status": "unindexed", "organ": "liver"}
+    state_record = {"slice_id": "mismatch", "status": "unindexed", "organ": "stomach"}
+    (case_directory / "manifest.jsonl").write_text(json.dumps(root_record) + "\n", encoding="utf-8")
+    unindexed_directory = case_directory / "unindexed"
+    unindexed_directory.mkdir()
+    (unindexed_directory / "unindexed.jsonl").write_text(json.dumps(state_record) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="内容不一致|mismatch"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
 def test_gallery_writer_preserves_combined_line_and_black_ratio_quality_evidence(tmp_path):
     writer = GalleryWriter(tmp_path / "case_001", case_id="case_001")
     empty = render_sample_images(np.full((20, 20), 127, dtype=np.uint8), 10.0, 10.0, [])

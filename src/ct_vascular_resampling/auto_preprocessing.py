@@ -61,8 +61,8 @@ def _label_values(raw: Any) -> dict[str, tuple[int, ...]]:
         if name not in raw:
             continue
         values = raw[name]
-        if not isinstance(values, list) or not values or any(not isinstance(value, int) or value < 0 for value in values):
-            raise ValueError(f"vessel_label_values.{name} 必须是非空非负整数列表")
+        if not isinstance(values, list) or not values or any(type(value) is not int or value <= 0 for value in values):
+            raise ValueError(f"vessel_label_values.{name} 必须是非空正整数列表")
         labels = tuple(values)
         overlap = all_values.intersection(labels)
         if overlap:
