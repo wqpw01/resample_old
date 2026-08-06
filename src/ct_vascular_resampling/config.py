@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -86,8 +86,10 @@ class VesselModel:
 @dataclass(frozen=True)
 class SamplingConfig:
     point_counts: dict[str, int]
-    stomach_search_distance_mm: float = 10.0
-    stomach_voxel_pitch_mm: float = 1.0
+    ray_length_mm: float = 100.0
+    minimum_spacing_mm: float = 10.0
+    centerline_voxel_pitch_mm: float = 1.0
+    centerline_tangent_window_mm: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,12 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True)
+class GeometryConfig:
+    input_coordinate_system: str = "LPS"
+    canonical_coordinate_system: str = "RAS"
+
+
+@dataclass(frozen=True)
 class CaseConfig:
     case_id: str
     ct_path: Path
@@ -142,6 +150,7 @@ class CaseConfig:
     ct: CTConfig
     filtering: FilterConfig
     runtime: RuntimeConfig
+    geometry: GeometryConfig = field(default_factory=GeometryConfig)
     dicom_series_uid: str | None = None
 
 
@@ -240,9 +249,26 @@ def _load_sampling(raw: Any) -> SamplingConfig:
         counts[name] = _integer(value, f"sampling.point_counts.{name}", counts[name])
     return SamplingConfig(
         point_counts=counts,
-        stomach_search_distance_mm=_number(values.get("stomach_search_distance_mm"), "sampling.stomach_search_distance_mm", 10.0),
-        stomach_voxel_pitch_mm=_number(values.get("stomach_voxel_pitch_mm"), "sampling.stomach_voxel_pitch_mm", 1.0),
+        ray_length_mm=_number(values.get("ray_length_mm"), "sampling.ray_length_mm", 100.0),
+        minimum_spacing_mm=_number(values.get("minimum_spacing_mm"), "sampling.minimum_spacing_mm", 10.0),
+        centerline_voxel_pitch_mm=_number(
+            values.get("centerline_voxel_pitch_mm"), "sampling.centerline_voxel_pitch_mm", 1.0
+        ),
+        centerline_tangent_window_mm=_number(
+            values.get("centerline_tangent_window_mm"), "sampling.centerline_tangent_window_mm", 10.0
+        ),
     )
+
+
+def _load_geometry(raw: Any) -> GeometryConfig:
+    values = _mapping(raw or {}, "geometry")
+    input_coordinate_system = str(values.get("input_coordinate_system", "LPS")).upper()
+    canonical_coordinate_system = str(values.get("canonical_coordinate_system", "RAS")).upper()
+    if input_coordinate_system not in {"LPS", "RAS"}:
+        raise ValueError("geometry.input_coordinate_system 必须是 LPS 或 RAS")
+    if canonical_coordinate_system != "RAS":
+        raise ValueError("geometry.canonical_coordinate_system 必须是 RAS")
+    return GeometryConfig(input_coordinate_system, canonical_coordinate_system)
 
 
 def _load_square(raw: Any) -> SquareConfig:
@@ -333,5 +359,6 @@ def load_case_config(path: str | Path) -> CaseConfig:
         ct=_load_ct(values.get("ct")),
         filtering=_load_filter(values.get("filtering")),
         runtime=_load_runtime(values.get("runtime")),
+        geometry=_load_geometry(values.get("geometry")),
         dicom_series_uid=dicom_series_uid,
     )

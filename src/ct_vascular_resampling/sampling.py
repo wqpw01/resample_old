@@ -2,8 +2,124 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Mapping
+
 import numpy as np
 from scipy.spatial import cKDTree
+import trimesh
+
+
+@dataclass(frozen=True)
+class RayFilterResult:
+    points: np.ndarray
+    normals: np.ndarray
+    target_ids: tuple[str, ...]
+    distances_mm: np.ndarray
+
+
+def filter_points_by_target_rays(
+    points: np.ndarray,
+    normals: np.ndarray,
+    targets: Mapping[str, trimesh.Trimesh],
+    ray_length_mm: float,
+) -> RayFilterResult:
+    point_values, normal_values = _paired_arrays(points, normals)
+    if ray_length_mm <= 0.0:
+        raise ValueError("ray_length_mm 必须大于零")
+    if not targets:
+        raise ValueError("targets 不能为空")
+    unit_normals = _normalised_rows(normal_values)
+    best_distances = np.full(len(point_values), np.inf, dtype=np.float64)
+    best_targets = np.full(len(point_values), "", dtype=object)
+    for target_id in sorted(targets):
+        mesh = targets[target_id]
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+            raise ValueError(f"目标网格无效: {target_id}")
+        locations, ray_indices, _ = mesh.ray.intersects_location(
+            ray_origins=point_values,
+            ray_directions=unit_normals,
+            multiple_hits=True,
+        )
+        if not len(locations):
+            continue
+        distances = np.einsum("ij,ij->i", locations - point_values[ray_indices], unit_normals[ray_indices])
+        valid = (distances > 1e-6) & (distances <= ray_length_mm + 1e-9)
+        for ray_index, distance in zip(ray_indices[valid], distances[valid], strict=True):
+            if distance < best_distances[ray_index]:
+                best_distances[ray_index] = float(distance)
+                best_targets[ray_index] = target_id
+    keep = np.isfinite(best_distances)
+    return RayFilterResult(
+        point_values[keep],
+        unit_normals[keep],
+        tuple(str(value) for value in best_targets[keep]),
+        best_distances[keep],
+    )
+
+
+def filter_liver_region_one_points(
+    liver_points: np.ndarray,
+    liver_normals: np.ndarray,
+    esophagus_points: np.ndarray,
+    vena_cava_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    points, normals = _paired_arrays(liver_points, liver_normals)
+    esophagus = np.asarray(esophagus_points, dtype=np.float64)
+    vena_cava = np.asarray(vena_cava_points, dtype=np.float64)
+    if len(esophagus) == 0 or len(vena_cava) == 0:
+        raise ValueError("食管和下腔静脉模型不能为空")
+    unit_normals = _normalised_rows(normals)
+    x_lower, x_upper = sorted((float(np.min(points[:, 0])) + 20.0, float(np.min(vena_cava[:, 0]))))
+    y_lower, y_upper = sorted((float(np.max(points[:, 1])) - 20.0, float(np.max(esophagus[:, 1]))))
+    mask = (
+        (points[:, 0] >= x_lower)
+        & (points[:, 0] <= x_upper)
+        & (points[:, 1] >= y_lower)
+        & (points[:, 1] <= y_upper)
+        & (unit_normals[:, 2] < 0.0)
+    )
+    return points[mask], unit_normals[mask]
+
+
+def filter_liver_region_two_points(
+    liver_points: np.ndarray,
+    liver_normals: np.ndarray,
+    spleen_points: np.ndarray,
+    vena_cava_points: np.ndarray,
+    pancreas_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    points, normals = _paired_arrays(liver_points, liver_normals)
+    spleen = np.asarray(spleen_points, dtype=np.float64)
+    vena_cava = np.asarray(vena_cava_points, dtype=np.float64)
+    pancreas = np.asarray(pancreas_points, dtype=np.float64)
+    if len(spleen) == 0 or len(vena_cava) == 0 or len(pancreas) == 0:
+        raise ValueError("脾脏、下腔静脉和胰腺模型不能为空")
+    unit_normals = _normalised_rows(normals)
+    x_lower, x_upper = sorted((float(np.max(spleen[:, 0])), float(np.max(vena_cava[:, 0]))))
+    y_limit = float(np.max(pancreas[:, 1]))
+    mask = (
+        (points[:, 0] >= x_lower)
+        & (points[:, 0] <= x_upper)
+        & (points[:, 1] < y_limit)
+        & (unit_normals[:, 1] < 0.0)
+        & (unit_normals[:, 2] < 0.0)
+    )
+    return points[mask], unit_normals[mask]
+
+
+def filter_duodenum_bulb_points(
+    duodenum_points: np.ndarray,
+    duodenum_normals: np.ndarray,
+    right_adrenal_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    points, normals = _paired_arrays(duodenum_points, duodenum_normals)
+    adrenal = np.asarray(right_adrenal_points, dtype=np.float64)
+    if len(adrenal) == 0:
+        raise ValueError("right_adrenal_points 不能为空")
+    unit_normals = _normalised_rows(normals)
+    mask = points[:, 2] > np.min(adrenal[:, 2])
+    return points[mask], unit_normals[mask]
 
 
 def farthest_point_indices(points: np.ndarray, count: int, seed: int) -> np.ndarray:
@@ -61,57 +177,21 @@ def _normalised_rows(normals: np.ndarray) -> np.ndarray:
     return values / magnitudes
 
 
-def filter_stomach_points(
+def extreme_plateau_centroid(
     points: np.ndarray,
-    normals: np.ndarray,
-    target_voxels: np.ndarray,
-    search_distance_mm: float = 10.0,
-    voxel_pitch_mm: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """复刻胃表面点到邻近器官体素的前向法线投影筛选。"""
-
-    point_values, normal_values = _paired_arrays(points, normals)
-    targets = np.asarray(target_voxels, dtype=np.float64)
-    if targets.ndim != 2 or targets.shape[1] != 3 or len(targets) == 0:
-        raise ValueError("target_voxels 必须是非空 N×3 数组")
-    if search_distance_mm <= 0.0 or voxel_pitch_mm <= 0.0:
-        raise ValueError("搜索距离和体素间距必须大于零")
-    unit_normals = _normalised_rows(normal_values)
-    tree = cKDTree(targets)
-    keep = np.zeros(len(point_values), dtype=bool)
-    for index, point in enumerate(point_values):
-        neighbors = tree.query_ball_point(point, r=search_distance_mm + voxel_pitch_mm)
-        if not neighbors:
-            continue
-        projections = (targets[neighbors] - point) @ unit_normals[index]
-        keep[index] = bool(np.any((projections > 1e-6) & (projections <= search_distance_mm)))
-    return point_values[keep], unit_normals[keep]
-
-
-def filter_liver_points(
-    liver_points: np.ndarray,
-    liver_normals: np.ndarray,
-    esophagus_points: np.ndarray,
-    gallbladder_points: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """复刻肝脏的坐标与法线约束，食管偏移固定为 +10 mm。"""
-
-    points, normals = _paired_arrays(liver_points, liver_normals)
-    esophagus = np.asarray(esophagus_points, dtype=np.float64)
-    gallbladder = np.asarray(gallbladder_points, dtype=np.float64)
-    if len(esophagus) == 0 or len(gallbladder) == 0:
-        raise ValueError("食管和胆囊模型不能为空")
-    esophagus_y = esophagus[np.argmin(esophagus[:, 2]), 1]
-    mask = (
-        (points[:, 0] >= np.min(points[:, 0]) + 20.0)
-        & (points[:, 1] <= np.max(points[:, 1]) - 20.0)
-        & (points[:, 1] >= esophagus_y + 10.0)
-        & (points[:, 0] <= np.min(gallbladder[:, 0]) - 35.0)
-        & (normals[:, 2] < 0.0)
-        & (normals[:, 0] < 0.5)
-        & (normals[:, 1] < 0.5)
-    )
-    return points[mask], normals[mask]
+    *,
+    axis: int,
+    maximum: bool,
+    atol_mm: float = 1e-6,
+) -> np.ndarray:
+    values = np.asarray(points, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != 3 or len(values) == 0:
+        raise ValueError("points 必须是非空 N×3 数组")
+    if axis not in (0, 1, 2) or atol_mm < 0.0:
+        raise ValueError("axis 或 atol_mm 无效")
+    extreme = np.max(values[:, axis]) if maximum else np.min(values[:, axis])
+    mask = np.isclose(values[:, axis], extreme, rtol=0.0, atol=atol_mm)
+    return np.mean(values[mask], axis=0)
 
 
 def filter_pancreas_points(
@@ -126,14 +206,13 @@ def filter_pancreas_points(
     if len(duodenum) == 0:
         raise ValueError("duodenum_points 不能为空")
     unit_normals = _normalised_rows(normals)
-    x_limit = duodenum[np.argmax(duodenum[:, 2]), 0]
+    x_limit = extreme_plateau_centroid(duodenum, axis=2, maximum=True)[0]
     mask = (
         (points[:, 0] < x_limit)
         & (unit_normals[:, 2] > np.cos(np.deg2rad(105.0)))
         & (unit_normals[:, 1] > 0.0)
-        & (unit_normals[:, 0] > 0.0)
     )
-    return points[mask], normals[mask]
+    return points[mask], unit_normals[mask]
 
 
 def filter_duodenum_upper_points(
@@ -141,25 +220,26 @@ def filter_duodenum_upper_points(
     duodenum_normals: np.ndarray,
     right_adrenal_points: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    points, normals = _paired_arrays(duodenum_points, duodenum_normals)
-    adrenal = np.asarray(right_adrenal_points, dtype=np.float64)
-    if len(adrenal) == 0:
-        raise ValueError("right_adrenal_points 不能为空")
-    mask = points[:, 2] > np.min(adrenal[:, 2])
-    return points[mask], normals[mask]
+    return filter_duodenum_bulb_points(duodenum_points, duodenum_normals, right_adrenal_points)
 
 
 def filter_duodenum_remainder_points(
     duodenum_points: np.ndarray,
     duodenum_normals: np.ndarray,
     aorta_points: np.ndarray,
+    right_adrenal_points: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     points, normals = _paired_arrays(duodenum_points, duodenum_normals)
     aorta = np.asarray(aorta_points, dtype=np.float64)
     if len(aorta) == 0:
         raise ValueError("aorta_points 不能为空")
-    mask = points[:, 0] > np.max(aorta[:, 0])
-    return points[mask], normals[mask]
+    adrenal = np.asarray(right_adrenal_points, dtype=np.float64)
+    if len(adrenal) == 0:
+        raise ValueError("right_adrenal_points 不能为空")
+    unit_normals = _normalised_rows(normals)
+    bulb_mask = points[:, 2] > np.min(adrenal[:, 2])
+    mask = (points[:, 0] > np.max(aorta[:, 0])) & ~bulb_mask
+    return points[mask], unit_normals[mask]
 
 
 def build_esophagus_samples(

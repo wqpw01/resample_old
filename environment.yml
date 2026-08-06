@@ -8,6 +8,7 @@ dependencies:
   - scikit-image
   - simpleitk
   - trimesh
+  - rtree
   - pillow
   - pyyaml
   - opencv

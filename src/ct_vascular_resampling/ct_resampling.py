@@ -9,6 +9,8 @@ import numpy as np
 import SimpleITK as sitk
 from scipy.ndimage import map_coordinates
 
+from .coordinates import to_ras_direction, to_ras_points
+
 
 @dataclass(frozen=True)
 class CTVolume:
@@ -20,15 +22,18 @@ class CTVolume:
     direction_xyz: np.ndarray
 
     @classmethod
-    def from_sitk(cls, image: sitk.Image) -> "CTVolume":
+    def from_sitk(cls, image: sitk.Image, *, input_coordinate_system: str = "RAS") -> "CTVolume":
         if image.GetDimension() != 3:
             raise ValueError("CT 图像必须是三维")
         data = sitk.GetArrayFromImage(image).astype(np.float32, copy=False)
         if data.ndim != 3:
             raise ValueError("CT 图像必须转换为 z×y×x 数组")
         spacing = np.asarray(image.GetSpacing(), dtype=np.float64)
-        origin = np.asarray(image.GetOrigin(), dtype=np.float64)
-        direction = np.asarray(image.GetDirection(), dtype=np.float64).reshape(3, 3)
+        origin = to_ras_points(np.asarray(image.GetOrigin(), dtype=np.float64), input_coordinate_system)
+        direction = to_ras_direction(
+            np.asarray(image.GetDirection(), dtype=np.float64).reshape(3, 3),
+            input_coordinate_system,
+        )
         if np.any(spacing <= 0.0) or not np.all(np.isfinite(origin)) or not np.all(np.isfinite(direction)):
             raise ValueError("CT spacing、origin 或 direction 无效")
         return cls(data_zyx=data, spacing_xyz=spacing, origin_xyz=origin, direction_xyz=direction)
@@ -86,7 +91,12 @@ class SquareFovDiagnosis:
         }
 
 
-def load_ct(path: str | Path, *, dicom_series_uid: str | None = None) -> CTVolume:
+def load_ct(
+    path: str | Path,
+    *,
+    dicom_series_uid: str | None = None,
+    input_coordinate_system: str = "RAS",
+) -> CTVolume:
     """读取 NIfTI、NRRD 或指定 DICOM 序列，保持原始物理空间。"""
 
     source = Path(path)
@@ -107,7 +117,7 @@ def load_ct(path: str | Path, *, dicom_series_uid: str | None = None) -> CTVolum
         if not filenames:
             raise ValueError(f"DICOM Series UID 没有切片文件: {selected_series_uid}")
         reader.SetFileNames(filenames)
-        return CTVolume.from_sitk(reader.Execute())
+        return CTVolume.from_sitk(reader.Execute(), input_coordinate_system=input_coordinate_system)
     if not source.is_file():
         raise FileNotFoundError(f"CT 文件不存在: {source}")
     if dicom_series_uid is not None:
@@ -115,7 +125,7 @@ def load_ct(path: str | Path, *, dicom_series_uid: str | None = None) -> CTVolum
     name = source.name.lower()
     if not name.endswith((".nii", ".nii.gz", ".nrrd")):
         raise ValueError(f"仅支持 NIfTI 或 NRRD CT: {source}")
-    return CTVolume.from_sitk(sitk.ReadImage(str(source)))
+    return CTVolume.from_sitk(sitk.ReadImage(str(source)), input_coordinate_system=input_coordinate_system)
 
 
 def sample_ct_square(

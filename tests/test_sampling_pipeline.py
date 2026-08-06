@@ -57,7 +57,7 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(tmp_path)
         "esophagus": export("esophagus", (0.0, 0.0, 0.0)),
         "gallbladder": export("gallbladder", (100.0, 0.0, 0.0)),
         "aorta": export("aorta", (-20.0, 0.0, 0.0)),
-        "adrenal_gland_right": export("adrenal_gland_right", (5.0, 0.0, -10.0)),
+        "adrenal_gland_right": export("adrenal_gland_right", (5.0, 0.0, 0.0)),
         "adrenal_gland_left": export("adrenal_gland_left", (5.0, 0.0, 0.0)),
         "inferior_vena_cava": export("inferior_vena_cava", (5.0, 0.0, 0.0)),
         "kidney_left": export("kidney_left", (5.0, 0.0, 0.0)),
@@ -67,7 +67,7 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(tmp_path)
     }
     settings = SamplingConfig(point_counts={"stomach": 1, "liver": 1, "pancreas": 1, "duodenum_part1": 1, "duodenum_part2": 1, "esophagus": 1})
 
-    samples = sample_organs(paths, settings, seed=0)
+    samples = sample_organs(paths, settings, seed=0, input_coordinate_system="RAS")
 
     assert set(samples) == {"stomach", "liver", "pancreas", "duodenum", "esophagus"}
     assert all(len(value.points) == len(value.normals) and len(value.points) > 0 for value in samples.values())

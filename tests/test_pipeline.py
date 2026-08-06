@@ -12,6 +12,7 @@ from ct_vascular_resampling.config import (
     CTConfig,
     CaseConfig,
     FilterConfig,
+    GeometryConfig,
     RuntimeConfig,
     SamplingConfig,
     SquareConfig,
@@ -234,6 +235,7 @@ def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_pa
         ct=CTConfig(output_resolution=20),
         filtering=FilterConfig(),
         runtime=RuntimeConfig(seed=0, workers=1, backend="cpu"),
+        geometry=GeometryConfig(input_coordinate_system="RAS"),
     )
     outside_sample = SquareSample(
         sample_id="esophagus-000010-x-01",
@@ -242,7 +244,7 @@ def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_pa
         input_normal_world=np.asarray([0.0, 0.0, 1.0]),
         vertices=np.asarray([[-1.0, 2.0, 5.0], [3.0, 2.0, 5.0], [3.0, 6.0, 5.0], [-1.0, 6.0, 5.0]]),
     )
-    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
     monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
     sample_many_calls: list[int] = []
     original_sample_many = CachedCpuBackend.sample_many
@@ -308,9 +310,10 @@ class HMMPoseEstimator:
         ct=CTConfig(output_resolution=20),
         filtering=FilterConfig(),
         runtime=RuntimeConfig(seed=0, workers=2, backend="cpu"),
+        geometry=GeometryConfig(input_coordinate_system="RAS"),
     )
     surfaces = {"stomach": SurfaceSamples(np.asarray([[8.0, 8.0, 8.0]]), np.asarray([[0.0, 0.0, 1.0]]))}
-    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_: surfaces)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: surfaces)
     cpu_batch_sizes: list[int] = []
     original_sample_many = CachedCpuBackend.sample_many
 
@@ -374,7 +377,7 @@ class HMMPoseEstimator:
     assert gpu_metadata["calibration"]["accepted"] is False
     assert gallery_record["resampling_backend"] == "cpu"
 
-    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
     empty_index = run_case(replace(config, case_id="empty_case"), steps=["index"])
 
     assert empty_index.indexed_feature_count == 0

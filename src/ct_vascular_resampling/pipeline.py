@@ -251,7 +251,12 @@ def run_case(
     if "filter" in selected:
         selected.add("render")
     _preflight(config)
-    surfaces = sample_organs(config.organ_models, config.sampling, config.runtime.seed)
+    surfaces = sample_organs(
+        config.organ_models,
+        config.sampling,
+        config.runtime.seed,
+        input_coordinate_system=config.geometry.input_coordinate_system,
+    )
     samples = generate_square_samples(surfaces, config.square)
     sampled_counts = {organ: len(surfaces.get(organ, SurfaceSamples([], [])).points) for organ in ORGAN_ORDER}
     if dry_run:
@@ -272,7 +277,11 @@ def run_case(
             write_square_samples_ply(case_directory / "squarePLY" / f"{_legacy_name(organ)}-vertex.ply", organ_squares)
         write_rectangles_ply(case_directory / "rectangles.ply", [frame_from_vertices(sample.vertices) for sample in samples])
     if "render" in selected:
-        volume = load_ct(config.ct_path, dicom_series_uid=config.dicom_series_uid)
+        volume = load_ct(
+            config.ct_path,
+            dicom_series_uid=config.dicom_series_uid,
+            input_coordinate_system=config.geometry.input_coordinate_system,
+        )
         writer = GalleryWriter(case_directory, config.case_id)
         pending_samples: list[SquareSample] = []
         for sample in samples:
@@ -282,12 +291,20 @@ def run_case(
                 continue
             pending_samples.append(sample)
         vessels = [
-            PreparedVessel(vessel.identifier, vessel.label, vessel.color, load_surface_mesh(vessel.path).mesh)
+            PreparedVessel(
+                vessel.identifier,
+                vessel.label,
+                vessel.color,
+                load_surface_mesh(vessel.path, input_coordinate_system=config.geometry.input_coordinate_system).mesh,
+            )
             for vessel in config.vessel_models
         ]
         organs = []
         for identifier in ORGAN_BOUNDARY_IDS:
-            mesh = load_surface_mesh(config.organ_models[identifier]).mesh
+            mesh = load_surface_mesh(
+                config.organ_models[identifier],
+                input_coordinate_system=config.geometry.input_coordinate_system,
+            ).mesh
             organs.append(PreparedOrgan(identifier, identifier, DEFAULT_ORGAN_COLORS[identifier], mesh, mesh.bounds.copy()))
         effective_workers = workers if workers is not None else config.runtime.workers
         if effective_workers < 1:

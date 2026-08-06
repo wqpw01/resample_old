@@ -9,21 +9,22 @@ from typing import Mapping
 import numpy as np
 
 from .config import SamplingConfig, SquareConfig
-from .mesh_io import SurfaceMesh, load_surface_mesh
+from .mesh_io import load_surface_mesh
 from .sampling import (
     build_esophagus_samples,
+    filter_duodenum_bulb_points,
     filter_duodenum_remainder_points,
-    filter_duodenum_upper_points,
-    filter_liver_points,
+    filter_liver_region_one_points,
+    filter_liver_region_two_points,
     filter_pancreas_points,
-    filter_stomach_points,
+    filter_points_by_target_rays,
     sample_points_with_normals,
 )
 from .squares import generate_sampling_squares
 
 
 ORGAN_ORDER = ("stomach", "liver", "pancreas", "duodenum", "esophagus")
-STOMACH_TARGETS = (
+TARGET_ORGANS = (
     "adrenal_gland_left",
     "adrenal_gland_right",
     "aorta",
@@ -64,49 +65,72 @@ def _sample(points: np.ndarray, normals: np.ndarray, count: int, seed: int) -> S
     return SurfaceSamples(sampled_points, sampled_normals)
 
 
-def _voxel_points(mesh: SurfaceMesh, pitch_mm: float) -> np.ndarray:
-    points = np.asarray(mesh.mesh.voxelized(pitch=pitch_mm).points, dtype=np.float64)
-    if len(points) == 0:
-        raise ValueError("目标器官体素化后没有体素点")
-    return points
+def _merge_unique(*pairs: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    point_arrays = [points for points, _ in pairs if len(points)]
+    normal_arrays = [normals for points, normals in pairs if len(points)]
+    if not point_arrays:
+        return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.float64)
+    points = np.vstack(point_arrays)
+    normals = np.vstack(normal_arrays)
+    _, first_indices = np.unique(points, axis=0, return_index=True)
+    retained = np.sort(first_indices)
+    return points[retained], normals[retained]
 
 
 def sample_organs(
     organ_models: Mapping[str, str | Path],
     settings: SamplingConfig,
     seed: int,
+    input_coordinate_system: str = "RAS",
 ) -> dict[str, SurfaceSamples]:
-    """按源项目五类算法从完整器官模型目录生成带法线的采样点。"""
+    """按核心设计区域从完整器官模型目录生成带法线的采样点。"""
 
-    meshes = {name: load_surface_mesh(path) for name, path in organ_models.items()}
-    target_voxels = np.vstack([_voxel_points(meshes[name], settings.stomach_voxel_pitch_mm) for name in STOMACH_TARGETS])
-    stomach_points, stomach_normals = filter_stomach_points(
+    meshes = {
+        name: load_surface_mesh(path, input_coordinate_system=input_coordinate_system)
+        for name, path in organ_models.items()
+    }
+    target_meshes = {name: meshes[name].mesh for name in TARGET_ORGANS}
+    stomach_rays = filter_points_by_target_rays(
         meshes["stomach"].vertices,
         meshes["stomach"].vertex_normals,
-        target_voxels,
-        settings.stomach_search_distance_mm,
-        settings.stomach_voxel_pitch_mm,
+        target_meshes,
+        settings.ray_length_mm,
     )
-    liver_points, liver_normals = filter_liver_points(
+    liver_one = filter_liver_region_one_points(
         meshes["liver"].vertices,
         meshes["liver"].vertex_normals,
         meshes["esophagus"].vertices,
-        meshes["gallbladder"].vertices,
+        meshes["inferior_vena_cava"].vertices,
     )
+    liver_two = filter_liver_region_two_points(
+        meshes["liver"].vertices,
+        meshes["liver"].vertex_normals,
+        meshes["spleen"].vertices,
+        meshes["inferior_vena_cava"].vertices,
+        meshes["pancreas"].vertices,
+    )
+    liver_points, liver_normals = _merge_unique(liver_one, liver_two)
     pancreas_points, pancreas_normals = filter_pancreas_points(
         meshes["pancreas"].vertices,
         meshes["pancreas"].vertex_normals,
         meshes["duodenum"].vertices,
     )
-    duodenum_upper_points, duodenum_upper_normals = filter_duodenum_upper_points(
+    duodenum_rays = filter_points_by_target_rays(
         meshes["duodenum"].vertices,
         meshes["duodenum"].vertex_normals,
+        target_meshes,
+        settings.ray_length_mm,
+    )
+    duodenum_upper_points, duodenum_upper_normals = filter_duodenum_bulb_points(
+        duodenum_rays.points,
+        duodenum_rays.normals,
         meshes["adrenal_gland_right"].vertices,
     )
     duodenum_remainder_points, duodenum_remainder_normals = filter_duodenum_remainder_points(
-        meshes["duodenum"].vertices,
-        meshes["duodenum"].vertex_normals,
+        duodenum_rays.points,
+        duodenum_rays.normals,
         meshes["aorta"].vertices,
+        meshes["adrenal_gland_right"].vertices,
     )
     esophagus_mask = (
         (meshes["esophagus"].vertices[:, 2] >= np.min(meshes["liver"].vertices[:, 2]))
@@ -114,6 +138,12 @@ def sample_organs(
     )
     esophagus_points = meshes["esophagus"].vertices[esophagus_mask]
     esophagus_normals = meshes["esophagus"].vertex_normals[esophagus_mask]
+    esophagus_rays = filter_points_by_target_rays(
+        esophagus_points,
+        esophagus_normals,
+        target_meshes,
+        settings.ray_length_mm,
+    )
 
     duodenum_upper = _sample(
         duodenum_upper_points,
@@ -134,14 +164,19 @@ def sample_organs(
         )
     else:
         duodenum = _empty_samples()
-    if len(esophagus_points):
+    if len(esophagus_rays.points):
         esophagus = SurfaceSamples(
-            *build_esophagus_samples(esophagus_points, esophagus_normals, settings.point_counts["esophagus"], seed + 5)
+            *build_esophagus_samples(
+                esophagus_rays.points,
+                esophagus_rays.normals,
+                settings.point_counts["esophagus"],
+                seed + 5,
+            )
         )
     else:
         esophagus = _empty_samples()
     return {
-        "stomach": _sample(stomach_points, stomach_normals, settings.point_counts["stomach"], seed),
+        "stomach": _sample(stomach_rays.points, stomach_rays.normals, settings.point_counts["stomach"], seed),
         "liver": _sample(liver_points, liver_normals, settings.point_counts["liver"], seed + 1),
         "pancreas": _sample(pancreas_points, pancreas_normals, settings.point_counts["pancreas"], seed + 2),
         "duodenum": duodenum,

@@ -110,6 +110,10 @@ def test_write_preprocessed_case_writes_ct_masks_meshes_manifest_and_case_yaml(t
     assert manifest['segmentation_origin_max_delta_mm'] < 1e-6
     assert config['organ_models']['portal_vein_and_splenic_vein'] == 'models/portal_vein_and_splenic_vein.ply'
     assert [model['label'] for model in config['vessel_models']] == ['artery', 'vein']
+    assert config['geometry'] == {'input_coordinate_system': 'LPS', 'canonical_coordinate_system': 'RAS'}
+    assert config['sampling']['ray_length_mm'] == 100.0
+    assert config['sampling']['minimum_spacing_mm'] == 10.0
+    assert 'stomach_search_distance_mm' not in config['sampling']
 
 
 def test_case2_runner_parser_requires_dicom_segmentation_and_output():

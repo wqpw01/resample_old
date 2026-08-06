@@ -118,6 +118,7 @@ def _case_config(
             {"id": "artery_tree", "path": "models/artery_tree.ply", "label": "artery", "color": [255, 82, 0]},
             {"id": "vein_tree", "path": "models/vein_tree.ply", "label": "vein", "color": [0, 188, 212]},
         ],
+        "geometry": {"input_coordinate_system": "LPS", "canonical_coordinate_system": "RAS"},
         "sampling": {
             "point_counts": {
                 "stomach": 1000,
@@ -127,8 +128,10 @@ def _case_config(
                 "duodenum_part2": 500,
                 "esophagus": 200,
             },
-            "stomach_search_distance_mm": 10.0,
-            "stomach_voxel_pitch_mm": 1.0,
+            "ray_length_mm": 100.0,
+            "minimum_spacing_mm": 10.0,
+            "centerline_voxel_pitch_mm": 1.0,
+            "centerline_tangent_window_mm": 10.0,
         },
         "square": {
             "side_length_mm": 100.0,

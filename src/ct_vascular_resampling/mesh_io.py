@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+from .coordinates import to_ras_points, to_ras_vectors
+
 
 SUPPORTED_MESH_SUFFIXES = {".obj", ".stl", ".ply"}
 
@@ -19,7 +21,7 @@ class SurfaceMesh:
     vertex_normals: np.ndarray
 
 
-def load_surface_mesh(path: str | Path) -> SurfaceMesh:
+def load_surface_mesh(path: str | Path, *, input_coordinate_system: str = "RAS") -> SurfaceMesh:
     """读取可进行截面相交的 OBJ/STL/PLY 三角网格。"""
 
     source = Path(path)
@@ -34,11 +36,12 @@ def load_surface_mesh(path: str | Path) -> SurfaceMesh:
         loaded = trimesh.util.concatenate(tuple(loaded.geometry.values()))
     if not isinstance(loaded, trimesh.Trimesh) or len(loaded.faces) == 0:
         raise ValueError(f"网格必须包含三角面，不能使用纯点云: {source}")
-    vertices = np.asarray(loaded.vertices, dtype=np.float64)
-    normals = np.asarray(loaded.vertex_normals, dtype=np.float64)
+    vertices = to_ras_points(np.asarray(loaded.vertices, dtype=np.float64), input_coordinate_system)
+    normals = to_ras_vectors(np.asarray(loaded.vertex_normals, dtype=np.float64), input_coordinate_system)
     if vertices.ndim != 2 or vertices.shape[1] != 3 or normals.shape != vertices.shape:
         raise ValueError(f"网格顶点或法线格式无效: {source}")
     magnitudes = np.linalg.norm(normals, axis=1, keepdims=True)
     if np.any(magnitudes < 1e-8):
         raise ValueError(f"网格包含零法线顶点: {source}")
+    loaded.vertices = vertices
     return SurfaceMesh(mesh=loaded, vertices=vertices, vertex_normals=normals / magnitudes)
