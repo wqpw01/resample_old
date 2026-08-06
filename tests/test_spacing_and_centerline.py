@@ -28,6 +28,7 @@ def test_constrained_fps_stops_at_ten_mm_and_preserves_point_normal_pairs():
     assert first.stats.candidate_count == 5
     assert first.stats.actual_count == 3
     assert first.stats.actual_minimum_distance_mm == pytest.approx(10.0)
+    assert np.array_equal(first.indices, [4, 0, 2])
     for point, normal in zip(first.points, first.normals, strict=True):
         assert normal[0] == points.tolist().index(point.tolist())
 
@@ -50,6 +51,22 @@ def test_esophagus_copies_the_entire_valid_span_before_spacing_limited_fps():
     assert np.min(result.points[:, 2]) == -20.0
     assert np.max(result.points[:, 2]) == 20.0
     assert result.stats.actual_minimum_distance_mm == pytest.approx(10.0)
+
+
+def test_esophagus_extension_uses_explicit_full_valid_segment_span():
+    points = np.asarray([[0.0, 0.0, 2.0], [0.0, 0.0, 8.0]])
+    normals = np.asarray([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+
+    result = build_esophagus_samples(
+        points,
+        normals,
+        count=4,
+        seed=0,
+        minimum_spacing_mm=1.0,
+        translation_span_mm=20.0,
+    )
+
+    assert set(result.points[:, 2]) == {-18.0, -12.0, 2.0, 8.0}
 
 
 def test_skeleton_order_prunes_only_a_short_terminal_spur():

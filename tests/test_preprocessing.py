@@ -113,6 +113,7 @@ def test_write_preprocessed_case_writes_ct_masks_meshes_manifest_and_case_yaml(t
     assert config['geometry'] == {'input_coordinate_system': 'LPS', 'canonical_coordinate_system': 'RAS'}
     assert config['sampling']['ray_length_mm'] == 100.0
     assert config['sampling']['minimum_spacing_mm'] == 10.0
+    assert config['sampling']['centerline_max_terminal_spur_mm'] == 5.0
     assert 'stomach_search_distance_mm' not in config['sampling']
 
 

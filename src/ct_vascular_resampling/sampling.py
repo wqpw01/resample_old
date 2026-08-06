@@ -16,6 +16,7 @@ class RayFilterResult:
     normals: np.ndarray
     target_ids: tuple[str, ...]
     distances_mm: np.ndarray
+    all_target_ids: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class SamplingResult:
     points: np.ndarray
     normals: np.ndarray
     stats: SamplingStatistics
+    indices: np.ndarray
 
 
 def sample_points_with_minimum_spacing(
@@ -69,6 +71,7 @@ def sample_points_with_minimum_spacing(
         sampled_points,
         sampled_normals,
         SamplingStatistics(count, len(point_values), len(sampled_points), minimum_spacing_mm, actual_minimum),
+        indices,
     )
 
 
@@ -86,6 +89,7 @@ def filter_points_by_target_rays(
     unit_normals = _normalised_rows(normal_values)
     best_distances = np.full(len(point_values), np.inf, dtype=np.float64)
     best_targets = np.full(len(point_values), "", dtype=object)
+    all_targets: list[set[str]] = [set() for _ in point_values]
     for target_id in sorted(targets):
         mesh = targets[target_id]
         if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
@@ -100,6 +104,7 @@ def filter_points_by_target_rays(
         distances = np.einsum("ij,ij->i", locations - point_values[ray_indices], unit_normals[ray_indices])
         valid = (distances > 1e-6) & (distances <= ray_length_mm + 1e-9)
         for ray_index, distance in zip(ray_indices[valid], distances[valid], strict=True):
+            all_targets[int(ray_index)].add(target_id)
             if distance < best_distances[ray_index]:
                 best_distances[ray_index] = float(distance)
                 best_targets[ray_index] = target_id
@@ -109,6 +114,7 @@ def filter_points_by_target_rays(
         unit_normals[keep],
         tuple(str(value) for value in best_targets[keep]),
         best_distances[keep],
+        tuple(tuple(sorted(all_targets[index])) for index in np.flatnonzero(keep)),
     )
 
 
@@ -173,6 +179,20 @@ def filter_duodenum_bulb_points(
         raise ValueError("right_adrenal_points 不能为空")
     unit_normals = _normalised_rows(normals)
     mask = points[:, 2] > np.min(adrenal[:, 2])
+    return points[mask], unit_normals[mask]
+
+
+def filter_esophagus_valid_segment(
+    esophagus_points: np.ndarray,
+    esophagus_normals: np.ndarray,
+    liver_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    points, normals = _paired_arrays(esophagus_points, esophagus_normals)
+    liver = np.asarray(liver_points, dtype=np.float64)
+    if len(points) == 0 or liver.ndim != 2 or liver.shape[1] != 3 or len(liver) == 0:
+        raise ValueError("食管和肝脏模型不能为空")
+    unit_normals = _normalised_rows(normals)
+    mask = (points[:, 2] >= np.min(points[:, 2])) & (points[:, 2] <= np.max(liver[:, 2]))
     return points[mask], unit_normals[mask]
 
 
@@ -302,6 +322,8 @@ def build_esophagus_samples(
     count: int,
     seed: int,
     minimum_spacing_mm: float = 0.0,
+    zero_plane_anchor_world: np.ndarray | None = None,
+    translation_span_mm: float | None = None,
 ) -> SamplingResult:
     """复制整个有效食管段后执行区域内 10 mm 约束采样。"""
 
@@ -310,7 +332,11 @@ def build_esophagus_samples(
         return sample_points_with_minimum_spacing(
             point_values, normal_values, count, seed, minimum_spacing_mm
         )
-    span = float(np.max(point_values[:, 2]) - np.min(point_values[:, 2]))
+    span = (
+        float(np.max(point_values[:, 2]) - np.min(point_values[:, 2]))
+        if translation_span_mm is None
+        else float(translation_span_mm)
+    )
     if span < 1e-8:
         raise ValueError("食管有效段的 z 跨度必须大于零")
     translated_points = point_values.copy()
@@ -324,6 +350,18 @@ def build_esophagus_samples(
         ):
             retained.append(index)
     retained_indices = np.asarray(retained, dtype=np.int64)
+    if zero_plane_anchor_world is not None:
+        from .squares import ordinary_local_frame
+
+        anchor = np.asarray(zero_plane_anchor_world, dtype=np.float64)
+        valid_indices = []
+        for index, (point, normal) in enumerate(zip(combined_points[retained_indices], combined_normals[retained_indices], strict=True)):
+            try:
+                ordinary_local_frame(point, normal, anchor)
+            except ValueError:
+                continue
+            valid_indices.append(index)
+        retained_indices = retained_indices[np.asarray(valid_indices, dtype=np.int64)]
     return sample_points_with_minimum_spacing(
         combined_points[retained_indices],
         combined_normals[retained_indices],

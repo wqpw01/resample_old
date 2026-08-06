@@ -19,10 +19,10 @@
 
 ### Task 2: Canonical RAS and design filters
 
-- [ ] Write failing coordinate conversion and filter boundary tests.
-- [ ] Implement explicit LPS-to-RAS CT and mesh boundaries.
-- [ ] Implement the 100 mm target-organ ray filter and R04-R06/R08-R09 region formulas.
-- [ ] Run focused and regression tests, update traceability evidence, and commit.
+- [x] Write failing coordinate conversion and filter boundary tests.
+- [x] Implement explicit LPS-to-RAS CT and mesh boundaries.
+- [x] Implement the 100 mm target-organ ray filter and R04-R06/R08-R09 region formulas.
+- [x] Run focused and regression tests, update traceability evidence, and commit.
 
 ### Task 3: Spacing, esophagus extension and centerline
 
@@ -33,10 +33,10 @@
 
 ### Task 4: Local frames and semantic poses
 
-- [ ] Write failing tests for ordinary/duodenum zero planes, right-handed axes, Z-Y-X rotations and pose counts.
-- [ ] Implement ordinary, supplemental and duodenum local-frame construction.
-- [ ] Implement yaw-region classification, stable pose IDs and strict duplicate suppression.
-- [ ] Run focused and regression tests, update traceability evidence, and commit.
+- [x] Write failing tests for ordinary/duodenum zero planes, right-handed axes, Z-Y-X rotations and pose counts.
+- [x] Implement ordinary, supplemental and duodenum local-frame construction.
+- [x] Implement yaw-region classification, stable pose IDs and strict duplicate suppression.
+- [x] Run focused and regression tests, update traceability evidence, and commit.
 
 ### Task 5: Streaming outputs and documentation
 

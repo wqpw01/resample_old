@@ -90,6 +90,7 @@ class SamplingConfig:
     minimum_spacing_mm: float = 10.0
     centerline_voxel_pitch_mm: float = 1.0
     centerline_tangent_window_mm: float = 10.0
+    centerline_max_terminal_spur_mm: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -256,6 +257,9 @@ def _load_sampling(raw: Any) -> SamplingConfig:
         ),
         centerline_tangent_window_mm=_number(
             values.get("centerline_tangent_window_mm"), "sampling.centerline_tangent_window_mm", 10.0
+        ),
+        centerline_max_terminal_spur_mm=_number(
+            values.get("centerline_max_terminal_spur_mm"), "sampling.centerline_max_terminal_spur_mm", 5.0
         ),
     )
 

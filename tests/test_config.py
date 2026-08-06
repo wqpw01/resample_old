@@ -46,6 +46,7 @@ def test_case_config_resolves_relative_paths_and_uses_confirmed_defaults(tmp_pat
     assert config.geometry.canonical_coordinate_system == "RAS"
     assert config.sampling.ray_length_mm == 100.0
     assert config.sampling.minimum_spacing_mm == 10.0
+    assert config.sampling.centerline_max_terminal_spur_mm == 5.0
     assert config.runtime.seed == 0
     assert config.filtering.black_ratio_limit == 0.50
     assert [model.label for model in config.vessel_models] == ["portal", "hepatic"]

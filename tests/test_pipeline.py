@@ -312,7 +312,16 @@ class HMMPoseEstimator:
         runtime=RuntimeConfig(seed=0, workers=2, backend="cpu"),
         geometry=GeometryConfig(input_coordinate_system="RAS"),
     )
-    surfaces = {"stomach": SurfaceSamples(np.asarray([[8.0, 8.0, 8.0]]), np.asarray([[0.0, 0.0, 1.0]]))}
+    surfaces = {
+        "stomach": SurfaceSamples(
+            np.asarray([[8.0, 8.0, 8.0]]),
+            np.asarray([[0.0, 0.0, 1.0]]),
+            region_ids=("stomach",),
+            target_ids=(("liver",),),
+            zero_plane_anchor_world=np.asarray([0.0, 0.0, 0.0]),
+            pancreas_special_x_limit=100.0,
+        )
+    }
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: surfaces)
     cpu_batch_sizes: list[int] = []
     original_sample_many = CachedCpuBackend.sample_many
@@ -324,19 +333,19 @@ class HMMPoseEstimator:
     monkeypatch.setattr(CachedCpuBackend, "sample_many", record_cpu_batch)
 
     dry = run_case(config, dry_run=True)
-    assert dry.total_squares == 81
+    assert dry.total_squares == 117
     assert not (tmp_path / "output").exists()
 
     completed = run_case(config)
 
-    assert completed.total_squares == 81
+    assert completed.total_squares == 117
     assert (tmp_path / "output" / "case_001" / "ResampledpointPLY" / "FPS-Stomach.ply").is_file()
     assert (tmp_path / "output" / "case_001" / "squarePLY" / "Stomach-vertex.ply").is_file()
     assert (tmp_path / "output" / "case_001" / "gallery" / "gallery.jsonl").is_file()
     metadata = json.loads((tmp_path / "output" / "case_001" / "run_metadata.json").read_text(encoding="utf-8"))
     assert metadata["selected_backend"] == "cpu"
-    assert metadata["total_squares"] == 81
-    assert cpu_batch_sizes == [1] * 81
+    assert metadata["total_squares"] == 117
+    assert cpu_batch_sizes == [1] * 117
     library_summary = json.loads((tmp_path / "output" / "case_001" / "library_summary.json").read_text(encoding="utf-8"))
     assert library_summary["case_id"] == "case_001"
     assert library_summary["indexed_feature_count"] == completed.indexed_feature_count

@@ -132,6 +132,7 @@ def _case_config(
             "minimum_spacing_mm": 10.0,
             "centerline_voxel_pitch_mm": 1.0,
             "centerline_tangent_window_mm": 10.0,
+            "centerline_max_terminal_spur_mm": 5.0,
         },
         "square": {
             "side_length_mm": 100.0,

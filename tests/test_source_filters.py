@@ -6,6 +6,7 @@ import trimesh
 from ct_vascular_resampling.sampling import (
     filter_duodenum_bulb_points,
     filter_duodenum_remainder_points,
+    filter_esophagus_valid_segment,
     filter_liver_region_one_points,
     filter_liver_region_two_points,
     filter_pancreas_points,
@@ -37,6 +38,38 @@ def test_target_ray_excludes_intersection_beyond_100_mm():
     )
 
     assert len(result.points) == 0
+
+
+def test_target_ray_records_all_intersected_organs_not_only_the_nearest():
+    liver = trimesh.creation.box(
+        extents=(2.0, 2.0, 2.0),
+        transform=trimesh.transformations.translation_matrix([10.0, 0.0, 0.0]),
+    )
+    pancreas = trimesh.creation.box(
+        extents=(2.0, 2.0, 2.0),
+        transform=trimesh.transformations.translation_matrix([20.0, 0.0, 0.0]),
+    )
+
+    result = filter_points_by_target_rays(
+        np.asarray([[0.0, 0.0, 0.0]]),
+        np.asarray([[1.0, 0.0, 0.0]]),
+        {"pancreas": pancreas, "liver": liver},
+        ray_length_mm=100.0,
+    )
+
+    assert result.target_ids == ("liver",)
+    assert result.all_target_ids == (("liver", "pancreas"),)
+
+
+def test_esophagus_valid_segment_starts_at_original_minimum_z_and_ends_at_liver_maximum_z():
+    esophagus_points = np.asarray([[0.0, 0.0, z] for z in (-5.0, 0.0, 5.0, 15.0)])
+    esophagus_normals = np.asarray([[1.0, 0.0, 0.0]] * len(esophagus_points))
+    liver_points = np.asarray([[0.0, 0.0, 0.0], [0.0, 0.0, 10.0]])
+
+    points, normals = filter_esophagus_valid_segment(esophagus_points, esophagus_normals, liver_points)
+
+    assert np.array_equal(points[:, 2], [-5.0, 0.0, 5.0])
+    assert np.array_equal(normals, esophagus_normals[:3])
 
 
 def test_pancreas_filter_uses_extreme_plateau_centroid_and_strict_angle_boundaries():
