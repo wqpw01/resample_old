@@ -40,10 +40,10 @@
 
 ### Task 5: Streaming outputs and documentation
 
-- [ ] Write failing integration tests for streaming pose output, resume behavior and RAS metadata.
-- [ ] Extend configuration and JSONL/run metadata without breaking retrieval fields.
-- [ ] Update repository and desktop Markdown documentation; regenerate desktop HTML from the Markdown source.
-- [ ] Run the full local suite, local-model sampling acceptance and code review; commit each coherent module.
+- [x] Write failing integration tests for streaming pose output, resume behavior and RAS metadata.
+- [x] Extend configuration and JSONL/run metadata without breaking retrieval fields.
+- [x] Update repository and desktop Markdown documentation; regenerate desktop HTML from the Markdown source.
+- [x] Run the full local suite, local-model sampling acceptance and code review; commit each coherent module.
 
 ### Task 6: GitHub and server deployment
 
