@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 from threading import RLock
 from typing import Iterable
 
@@ -31,31 +32,90 @@ def write_rectangles_ply(path: str | Path, frames: Iterable[SquareFrame]) -> Non
     """以无 face 的连续四点 ASCII PLY 原子写出方形。"""
 
     destination = Path(path)
-    all_frames = list(frames)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    body = destination.with_name(f".{destination.name}.body.tmp")
     temporary = destination.with_name(f".{destination.name}.tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(
-            "ply\nformat ascii 1.0\n"
-            f"element vertex {len(all_frames) * 4}\n"
-            "property float x\nproperty float y\nproperty float z\nend_header\n"
-        )
-        for frame in all_frames:
-            for vertex in frame.vertices:
-                handle.write(f"{vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
-    os.replace(temporary, destination)
+    frame_count = 0
+    try:
+        with body.open("w", encoding="utf-8", newline="\n") as handle:
+            for frame in frames:
+                for vertex in frame.vertices:
+                    handle.write(f"{vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
+                frame_count += 1
+        with temporary.open("w", encoding="utf-8", newline="\n") as output, body.open(
+            "r", encoding="utf-8"
+        ) as source:
+            output.write(
+                "ply\nformat ascii 1.0\n"
+                f"element vertex {frame_count * 4}\n"
+                "property float x\nproperty float y\nproperty float z\nend_header\n"
+            )
+            shutil.copyfileobj(source, output)
+        os.replace(temporary, destination)
+    finally:
+        body.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
 
 
 class GalleryWriter:
     """将样本稳定写入 gallery、unindexed、rejected 或 FOV 排除清单。"""
 
-    def __init__(self, case_directory: str | Path, case_id: str):
+    def __init__(
+        self,
+        case_directory: str | Path,
+        case_id: str,
+        *,
+        required_core_design_sha256: str | None = None,
+    ):
         self.case_directory = Path(case_directory)
         self.case_id = case_id
+        self.required_core_design_sha256 = required_core_design_sha256
         self.manifest_path = self.case_directory / "manifest.jsonl"
         self.case_directory.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self.completed_records: dict[str, dict] = {}
         self.completed_statuses = self._load_completed_statuses()
+
+    @staticmethod
+    def _is_finite_number(value: object) -> bool:
+        return not isinstance(value, (bool, np.bool_)) and isinstance(
+            value, (int, float, np.integer, np.floating)
+        ) and bool(np.isfinite(value))
+
+    def _validate_pose_record(self, record: dict) -> None:
+        if self.required_core_design_sha256 is None:
+            return
+        if record.get("coordinate_system") != "RAS":
+            raise ValueError("位姿 coordinate_system 必须为 RAS")
+        if record.get("core_design_sha256") != self.required_core_design_sha256:
+            raise ValueError("位姿 core_design_sha256 与当前核心设计不一致")
+        commit = record.get("build_git_commit")
+        if not isinstance(commit, str) or len(commit) != 40 or any(
+            character.lower() not in "0123456789abcdef" for character in commit
+        ):
+            raise ValueError("位姿 build_git_commit 必须为 40 位十六进制 Git commit")
+        if not isinstance(record.get("source_region"), str) or not record["source_region"]:
+            raise ValueError("位姿 source_region 必须为非空字符串")
+        if record.get("yaw_policy") not in {"standard", "duodenum_bulb", "pancreas_special"}:
+            raise ValueError("位姿 yaw_policy 不受支持")
+        angles = record.get("angles_degrees")
+        if not isinstance(angles, dict) or set(angles) != {"roll", "pitch", "yaw"} or any(
+            not self._is_finite_number(angles[axis]) for axis in ("roll", "pitch", "yaw")
+        ):
+            raise ValueError("位姿 angles_degrees 必须包含有限的 roll、pitch、yaw")
+        axes = record.get("local_axes_world")
+        if not isinstance(axes, dict) or set(axes) != {"x", "y", "z"}:
+            raise ValueError("位姿 local_axes_world 必须包含 x、y、z")
+        for axis in ("x", "y", "z"):
+            vector = axes[axis]
+            if not isinstance(vector, list) or len(vector) != 3 or any(
+                not self._is_finite_number(component) for component in vector
+            ):
+                raise ValueError(f"位姿 local_axes_world.{axis} 必须为三个有限数值")
+        for field in ("target_ids", "duplicate_source_regions"):
+            values = record.get(field)
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError(f"位姿 {field} 必须为字符串列表")
 
     def _validate_gallery_record(self, record: dict) -> None:
         combined_path = record.get("organ_vessel_boundary_png")
@@ -95,6 +155,7 @@ class GalleryWriter:
                         record_status = str(record["status"])
                         if record_status != status:
                             raise ValueError(f"记录状态应为 {status}，实际为 {record_status}")
+                        self._validate_pose_record(record)
                         if status == "gallery":
                             self._validate_gallery_record(record)
                         if sample_id in entries:
@@ -126,6 +187,7 @@ class GalleryWriter:
                     status = str(record["status"])
                     if status not in state_manifest_paths:
                         raise ValueError(f"不支持的样本状态: {status}")
+                    self._validate_pose_record(record)
                     if status == "gallery":
                         self._validate_gallery_record(record)
                     if sample_id in root_entries:
@@ -146,6 +208,7 @@ class GalleryWriter:
                         raise ValueError(f"根 manifest 与 {status} 清单的记录内容不一致: {sample_id}")
                     root_entries[sample_id] = (status, digest)
                     completed[sample_id] = status
+                    self.completed_records[sample_id] = record
                 except (json.JSONDecodeError, KeyError, ValueError) as error:
                     raise ValueError(f"全量清单第 {line_number} 行损坏: {error}") from error
         orphaned = state_entries.keys() - root_entries.keys()
@@ -181,6 +244,13 @@ class GalleryWriter:
         with self._lock:
             return self.completed_statuses.get(sample_id)
 
+    def completed_record(self, sample_id: str) -> dict | None:
+        """返回已持久化记录的副本，供恢复模式核对当前姿态。"""
+
+        with self._lock:
+            record = self.completed_records.get(sample_id)
+            return None if record is None else dict(record)
+
     def write_sample(
         self,
         sample_id: str,
@@ -192,6 +262,7 @@ class GalleryWriter:
         quality: QualityResult,
         resampling_backend: str | None = None,
         fov_diagnostics: dict[str, object] | None = None,
+        pose_metadata: dict[str, object] | None = None,
     ) -> str:
         with self._lock:
             return self._write_sample(
@@ -204,6 +275,7 @@ class GalleryWriter:
                 quality,
                 resampling_backend,
                 fov_diagnostics,
+                pose_metadata,
             )
 
     def write_fov_exclusion(
@@ -216,12 +288,14 @@ class GalleryWriter:
         fov_diagnostics: dict[str, object],
         ct_image: Image.Image,
         resampling_backend: str,
+        pose_metadata: dict[str, object] | None = None,
     ) -> str:
         """记录 CT FOV 外的方形，只保存黑色填充的灰度 CT PNG。"""
 
         with self._lock:
             if sample_id in self.completed_statuses:
                 return self.completed_statuses[sample_id]
+            self._validate_pose_record(pose_metadata or {})
             root = self.case_directory / "excluded_fov"
             ct_path = root / "ct" / f"{sample_id}.png"
             self._save_png(ct_image, ct_path)
@@ -247,9 +321,12 @@ class GalleryWriter:
                 "ct_png": str(ct_path.relative_to(root)),
                 "resampling_backend": resampling_backend,
             }
+            if pose_metadata:
+                record.update(pose_metadata)
             self._append_jsonl(self.manifest_path, record)
             self._append_jsonl(self.case_directory / "excluded_fov.jsonl", record)
             self.completed_statuses[sample_id] = "excluded_fov"
+            self.completed_records[sample_id] = record
             return "excluded_fov"
 
     def _write_sample(
@@ -263,11 +340,13 @@ class GalleryWriter:
         quality: QualityResult,
         resampling_backend: str | None,
         fov_diagnostics: dict[str, object] | None,
+        pose_metadata: dict[str, object] | None,
     ) -> str:
         """保存一个样本；已完成的 ID 返回其既有状态。"""
 
         if sample_id in self.completed_statuses:
             return self.completed_statuses[sample_id]
+        self._validate_pose_record(pose_metadata or {})
         status = self._status_for(rendered, quality)
         root = self.case_directory / status
         ct_path = root / "ct" / f"{sample_id}.png"
@@ -320,8 +399,11 @@ class GalleryWriter:
             record["resampling_backend"] = resampling_backend
         if fov_diagnostics is not None:
             record["fov_diagnostics"] = fov_diagnostics
+        if pose_metadata:
+            record.update(pose_metadata)
         self._append_jsonl(self.manifest_path, record)
         record_path = root / ({"gallery": "gallery.jsonl", "unindexed": "unindexed.jsonl", "rejected": "rejected.jsonl"}[status])
         self._append_jsonl(record_path, record)
         self.completed_statuses[sample_id] = status
+        self.completed_records[sample_id] = record
         return status

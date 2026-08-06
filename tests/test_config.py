@@ -45,6 +45,7 @@ def test_case_config_resolves_relative_paths_and_uses_confirmed_defaults(tmp_pat
     assert config.geometry.input_coordinate_system == "LPS"
     assert config.geometry.canonical_coordinate_system == "RAS"
     assert config.sampling.ray_length_mm == 100.0
+    assert config.sampling.ray_batch_size == 2048
     assert config.sampling.minimum_spacing_mm == 10.0
     assert config.sampling.centerline_max_terminal_spur_mm == 5.0
     assert config.runtime.seed == 0
@@ -105,6 +106,30 @@ def test_case_config_loads_resampling_backend_controls(tmp_path):
     assert config.runtime.backend == "gpu"
     assert config.runtime.gpu_device == 2
     assert config.runtime.gpu_batch_size == 16
+
+
+def test_case_config_rejects_obsolete_optional_pose_deduplication_switch(tmp_path):
+    organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        _case_yaml(organ_models) + "\nsquare:\n  deduplicate_degenerate_edge_angles: false\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="deduplicate_degenerate_edge_angles|不支持"):
+        load_case_config(config_path)
+
+
+def test_case_config_rejects_obsolete_sampling_keys_instead_of_silently_using_defaults(tmp_path):
+    organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        _case_yaml(organ_models) + "\nsampling:\n  stomach_search_distance_mm: 10.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="stomach_search_distance_mm|不支持"):
+        load_case_config(config_path)
 
 
 def test_case_config_accepts_an_explicit_dicom_series_uid(tmp_path):

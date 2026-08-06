@@ -39,8 +39,12 @@ sampling:
     duodenum_part1: 500
     duodenum_part2: 500
     esophagus: 200
-  stomach_search_distance_mm: 10.0
-  stomach_voxel_pitch_mm: 1.0
+  ray_length_mm: 100.0
+  ray_batch_size: 2048
+  minimum_spacing_mm: 10.0
+  centerline_voxel_pitch_mm: 1.0
+  centerline_tangent_window_mm: 10.0
+  centerline_max_terminal_spur_mm: 5.0
 
 square:
   side_length_mm: 100.0

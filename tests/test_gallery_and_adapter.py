@@ -244,6 +244,23 @@ def test_gallery_writer_rejects_state_record_missing_from_root_manifest(tmp_path
         GalleryWriter(case_directory, case_id="case_001")
 
 
+def test_gallery_writer_strict_pose_protocol_rejects_legacy_completed_record(tmp_path):
+    case_directory = tmp_path / "case_001"
+    state_directory = case_directory / "unindexed"
+    state_directory.mkdir(parents=True)
+    record = {"slice_id": "legacy-unindexed", "status": "unindexed"}
+    serialized = json.dumps(record) + "\n"
+    (case_directory / "manifest.jsonl").write_text(serialized, encoding="utf-8")
+    (state_directory / "unindexed.jsonl").write_text(serialized, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="位姿|coordinate_system|core_design"):
+        GalleryWriter(
+            case_directory,
+            case_id="case_001",
+            required_core_design_sha256="4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b",
+        )
+
+
 def test_gallery_writer_rejects_duplicate_state_manifest_records(tmp_path):
     case_directory = tmp_path / "case_001"
     case_directory.mkdir()
@@ -327,6 +344,29 @@ def test_rectangle_ply_contains_four_vertices_per_frame(tmp_path):
     path = tmp_path / "rectangles.ply"
 
     write_rectangles_ply(path, [_frame()])
+
+    assert "element vertex 4" in path.read_text(encoding="utf-8")
+
+
+def test_rectangle_ply_writer_streams_a_single_pass_iterable(tmp_path):
+    class StreamingOnlyIterator:
+        def __init__(self):
+            self._remaining = [_frame()]
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if not self._remaining:
+                raise StopIteration
+            return self._remaining.pop()
+
+        def __length_hint__(self):
+            raise AssertionError("writer must stream instead of materializing the iterable")
+
+    path = tmp_path / "rectangles-streamed.ply"
+
+    write_rectangles_ply(path, StreamingOnlyIterator())
 
     assert "element vertex 4" in path.read_text(encoding="utf-8")
 

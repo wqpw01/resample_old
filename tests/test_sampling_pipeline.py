@@ -10,6 +10,7 @@ from ct_vascular_resampling.sampling_pipeline import (
     SquareSample,
     SurfaceSamples,
     _deduplicate_exact_poses,
+    _merge_unique,
     _sample,
     _valid_ordinary_indices,
     generate_square_samples,
@@ -46,6 +47,27 @@ def test_square_sample_expansion_uses_confirmed_axis_count_and_variant_count():
     assert np.isclose(np.linalg.norm(stomach[0].vertices[1] - stomach[0].vertices[0]), 100.0)
 
 
+def test_square_sample_expansion_returns_a_reiterable_pose_stream_instead_of_a_list():
+    surfaces = {
+        "stomach": SurfaceSamples(
+            np.asarray([[0.0, 0.0, 0.0]]),
+            np.asarray([[1.0, 0.0, 0.0]]),
+            region_ids=("stomach",),
+            target_ids=(("liver",),),
+            zero_plane_anchor_world=np.asarray([0.0, -1.0, 0.0]),
+            pancreas_special_x_limit=10.0,
+        )
+    }
+
+    samples = generate_square_samples(surfaces, SquareConfig())
+
+    assert not isinstance(samples, list)
+    assert len(samples) == 117
+    first_ids = [sample.sample_id for sample in samples]
+    second_ids = [sample.sample_id for sample in samples]
+    assert first_ids == second_ids
+
+
 def test_square_sample_expansion_uses_pancreas_special_yaw_policy():
     surfaces = {
         "stomach": SurfaceSamples(
@@ -65,6 +87,29 @@ def test_square_sample_expansion_uses_pancreas_special_yaw_policy():
     assert {sample.yaw_policy for sample in stomach} == {"pancreas_special"}
     assert min(sample.yaw_degrees for sample in stomach) == -120.0
     assert max(sample.yaw_degrees for sample in stomach) == 30.0
+
+
+def test_duodenum_pancreas_ray_hit_does_not_use_the_stomach_pancreas_special_yaw_policy():
+    centerline_points = np.column_stack([np.zeros(21), np.zeros(21), np.arange(21, dtype=np.float64)])
+    centerline = CenterlinePath(
+        centerline_points,
+        np.asarray([[0.0, 0.0, 1.0]] * len(centerline_points)),
+        np.arange(len(centerline_points), dtype=np.float64),
+    )
+    surfaces = {
+        "duodenum": SurfaceSamples(
+            np.asarray([[2.0, 0.0, 10.0]]),
+            np.asarray([[1.0, 0.0, 0.0]]),
+            region_ids=("duodenum_remainder",),
+            target_ids=(("pancreas",),),
+            centerline=centerline,
+        )
+    }
+
+    samples = generate_square_samples(surfaces, SquareConfig())
+
+    assert len(samples) == 117
+    assert {sample.yaw_policy for sample in samples} == {"standard"}
 
 
 def test_exact_duplicate_pose_keeps_base_region_and_records_supplement_source():
@@ -134,6 +179,33 @@ def test_sampling_region_without_legal_candidates_fails_instead_of_emitting_an_e
             minimum_spacing_mm=10.0,
             region_id="stomach",
         )
+
+
+def test_liver_region_provenance_survives_candidate_merge_and_fps():
+    normal = np.asarray([[0.0, 0.0, -1.0]])
+    region_one = (np.asarray([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0]]), np.vstack([normal, normal]))
+    region_two = (np.asarray([[20.0, 0.0, 0.0], [40.0, 0.0, 0.0]]), np.vstack([normal, normal]))
+
+    points, normals, region_ids = _merge_unique(
+        (*region_one, "liver_region_one"),
+        (*region_two, "liver_region_two"),
+    )
+    sampled = _sample(
+        points,
+        normals,
+        count=3,
+        seed=0,
+        minimum_spacing_mm=10.0,
+        region_id="liver",
+        region_ids=region_ids,
+    )
+
+    assert region_ids == (
+        "liver_region_one",
+        "liver_region_one+liver_region_two",
+        "liver_region_two",
+    )
+    assert set(sampled.region_ids) == set(region_ids)
 
 
 def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypatch, tmp_path):

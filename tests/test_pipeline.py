@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import numpy as np
 from PIL import Image
+import pytest
 import SimpleITK as sitk
 import trimesh
 from pathlib import Path
@@ -39,6 +40,15 @@ def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):
         probe_point_world=np.asarray([7.0, 7.0, 5.0]),
         input_normal_world=np.asarray([0.0, 0.0, 1.0]),
         vertices=np.asarray([[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]),
+        source_region="stomach",
+        yaw_policy="standard",
+        roll_degrees=-5.0,
+        pitch_degrees=0.0,
+        yaw_degrees=30.0,
+        local_x_world=np.asarray([0.0, 1.0, 0.0]),
+        local_y_world=np.asarray([1.0, 0.0, 0.0]),
+        local_z_world=np.asarray([0.0, 0.0, -1.0]),
+        target_ids=("liver",),
     )
     writer = GalleryWriter(tmp_path / "case", "case")
 
@@ -57,6 +67,12 @@ def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):
     assert (tmp_path / "case" / "gallery" / "organ_vessel_boundary" / "stomach-000000-x-00.png").is_file()
     record = json.loads((tmp_path / "case" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8"))
     assert record["organ_labels"] == ["liver"]
+    assert record["coordinate_system"] == "RAS"
+    assert record["core_design_sha256"] == "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
+    assert len(record["build_git_commit"]) == 40
+    assert record["source_region"] == "stomach"
+    assert record["angles_degrees"] == {"roll": -5.0, "pitch": 0.0, "yaw": 30.0}
+    assert record["target_ids"] == ["liver"]
 
 
 def test_precomputed_square_writes_the_same_gallery_artifacts(tmp_path):
@@ -243,6 +259,11 @@ def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_pa
         probe_point_world=np.asarray([1.0, 3.0, 5.0]),
         input_normal_world=np.asarray([0.0, 0.0, 1.0]),
         vertices=np.asarray([[-1.0, 2.0, 5.0], [3.0, 2.0, 5.0], [3.0, 6.0, 5.0], [-1.0, 6.0, 5.0]]),
+        source_region="esophagus",
+        yaw_policy="standard",
+        local_x_world=np.asarray([0.0, 0.0, 1.0]),
+        local_y_world=np.asarray([1.0, 0.0, 0.0]),
+        local_z_world=np.asarray([0.0, 1.0, 0.0]),
     )
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
     monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
@@ -345,13 +366,105 @@ class HMMPoseEstimator:
     metadata = json.loads((tmp_path / "output" / "case_001" / "run_metadata.json").read_text(encoding="utf-8"))
     assert metadata["selected_backend"] == "cpu"
     assert metadata["total_squares"] == 117
-    assert cpu_batch_sizes == [1] * 117
+    assert metadata["coordinate_system"] == "RAS"
+    assert metadata["core_design_sha256"] == "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
+    assert len(metadata["build_git_commit"]) == 40
+    assert metadata["minimum_point_spacing_mm"] == 10.0
+    assert metadata["pose_angles_degrees"]["roll"] == [-5.0, 0.0, 5.0]
+    assert metadata["square_sampling"] == {
+        "side_length_mm": 10.0,
+        "output_resolution": [20, 20],
+        "interpolation": "cubic_bspline",
+        "interpolation_order": 3,
+        "window_level_hu": 40.0,
+        "window_width_hu": 400.0,
+        "fill_hu_value": -1000.0,
+    }
+    assert metadata["quality_filtering"] == {
+        "black_threshold": 50,
+        "black_ratio_limit": 0.5,
+        "line_min_diagonal_fraction": 0.7,
+        "black_side_min_ratio": 0.9,
+        "valid_side_max_black_ratio": 0.1,
+    }
+    assert metadata["fov_policy"] == {
+        "vertex_rule": "any_square_vertex_outside_ct",
+        "outside_status": "excluded_fov",
+        "saved_artifacts": ["ct_png"],
+        "out_of_bounds_png_value": 0,
+    }
+    assert metadata["completed_pose_count"] == 117
+    assert metadata["status_counts"] == completed.status_counts
+    assert cpu_batch_sizes == [8] * 14 + [5]
     library_summary = json.loads((tmp_path / "output" / "case_001" / "library_summary.json").read_text(encoding="utf-8"))
     assert library_summary["case_id"] == "case_001"
     assert library_summary["indexed_feature_count"] == completed.indexed_feature_count
     assert library_summary["gallery_manifest"] == "gallery/gallery.jsonl"
     assert set(library_summary["organ_boundary_colors"]) == set(pipeline_module.ORGAN_BOUNDARY_IDS)
     assert set(library_summary["organ_label_counts"]).issubset(set(pipeline_module.ORGAN_BOUNDARY_IDS))
+
+    calls_after_first_run = list(cpu_batch_sizes)
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.create_sampling_backend",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no-op resume must not initialize a backend")),
+    )
+    resumed = run_case(config)
+    assert cpu_batch_sizes == calls_after_first_run
+    assert sum(resumed.status_counts.values()) == 117
+    assert len((tmp_path / "output" / "case_001" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()) == 117
+
+    rectangles_before_incompatible_resume = (
+        tmp_path / "output" / "case_001" / "rectangles.ply"
+    ).read_bytes()
+    incompatible_config = replace(config, square=replace(config.square, side_length_mm=11.0))
+    with pytest.raises(ValueError, match="运行协议|配置|不一致"):
+        run_case(incompatible_config)
+    assert (tmp_path / "output" / "case_001" / "rectangles.ply").read_bytes() == rectangles_before_incompatible_resume
+
+    recolored_config = replace(
+        config,
+        vessel_models=(
+            replace(config.vessel_models[0], color=(1, 2, 3)),
+            config.vessel_models[1],
+        ),
+    )
+    with pytest.raises(ValueError, match="运行协议|配置|不一致"):
+        run_case(recolored_config)
+
+    shifted_surfaces = {
+        "stomach": replace(
+            surfaces["stomach"],
+            points=surfaces["stomach"].points + np.asarray([0.0, 0.0, 1.0]),
+        )
+    }
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: shifted_surfaces)
+    with pytest.raises(ValueError, match="姿态|几何|不一致"):
+        run_case(config)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: surfaces)
+
+    original_mesh_bytes = mesh_path.read_bytes()
+    mesh_path.write_bytes(original_mesh_bytes + b"\n# changed input\n")
+    with pytest.raises(ValueError, match="输入|运行协议|不一致"):
+        run_case(config)
+    mesh_path.write_bytes(original_mesh_bytes)
+
+    case_directory = tmp_path / "output" / "case_001"
+    manifest_path = case_directory / "manifest.jsonl"
+    existing_record = json.loads(manifest_path.read_text(encoding="utf-8").splitlines()[0])
+    stale_record = {**existing_record, "slice_id": "stale-pose-id"}
+    serialized_stale = json.dumps(stale_record) + "\n"
+    with manifest_path.open("a", encoding="utf-8") as handle:
+        handle.write(serialized_stale)
+    state_paths = {
+        "gallery": case_directory / "gallery" / "gallery.jsonl",
+        "unindexed": case_directory / "unindexed" / "unindexed.jsonl",
+        "rejected": case_directory / "rejected" / "rejected.jsonl",
+        "excluded_fov": case_directory / "excluded_fov.jsonl",
+    }
+    with state_paths[stale_record["status"]].open("a", encoding="utf-8") as handle:
+        handle.write(serialized_stale)
+    with pytest.raises(ValueError, match="陈旧|额外|姿态集合|stale-pose-id"):
+        run_case(config)
 
     class OffsetBackend:
         name = "gpu:0"

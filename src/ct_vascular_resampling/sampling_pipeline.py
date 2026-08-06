@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
@@ -29,6 +30,7 @@ from .squares import (
     DUODENUM_BULB_YAW,
     PANCREAS_SPECIAL_YAW,
     STANDARD_YAW,
+    YAW_ANGLES_DEGREES,
     duodenum_local_frame,
     generate_pose_variants,
     ordinary_local_frame,
@@ -93,6 +95,7 @@ def _sample(
     seed: int,
     minimum_spacing_mm: float,
     region_id: str,
+    region_ids: tuple[str, ...] = (),
     target_ids: tuple[tuple[str, ...], ...] = (),
     zero_plane_anchor_world: np.ndarray | None = None,
     centerline: CenterlinePath | None = None,
@@ -100,6 +103,8 @@ def _sample(
 ) -> SurfaceSamples:
     if len(points) == 0:
         raise ValueError(f"{region_id} 没有可构造局部坐标的合法候选")
+    if region_ids and len(region_ids) != len(points):
+        raise ValueError(f"{region_id} 的区域来源数量与候选点数量不一致")
     result = sample_points_with_minimum_spacing(
         points,
         normals,
@@ -108,11 +113,14 @@ def _sample(
         minimum_spacing_mm=minimum_spacing_mm,
     )
     selected_targets = tuple(target_ids[index] for index in result.indices) if target_ids else tuple(() for _ in result.indices)
+    selected_regions = tuple(region_ids[index] for index in result.indices) if region_ids else tuple(
+        region_id for _ in result.indices
+    )
     return SurfaceSamples(
         result.points,
         result.normals,
         {region_id: result.stats},
-        tuple(region_id for _ in result.indices),
+        selected_regions,
         selected_targets,
         zero_plane_anchor_world,
         centerline,
@@ -148,16 +156,25 @@ def _valid_duodenum_indices(points: np.ndarray, normals: np.ndarray, centerline:
     return np.asarray(valid, dtype=np.int64)
 
 
-def _merge_unique(*pairs: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
-    point_arrays = [points for points, _ in pairs if len(points)]
-    normal_arrays = [normals for points, normals in pairs if len(points)]
+def _merge_unique(
+    *groups: tuple[np.ndarray, np.ndarray, str],
+) -> tuple[np.ndarray, np.ndarray, tuple[str, ...]]:
+    nonempty = [(points, normals, region_id) for points, normals, region_id in groups if len(points)]
+    point_arrays = [points for points, _, _ in nonempty]
+    normal_arrays = [normals for _, normals, _ in nonempty]
     if not point_arrays:
-        return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.float64)
+        return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.float64), ()
     points = np.vstack(point_arrays)
     normals = np.vstack(normal_arrays)
-    _, first_indices = np.unique(points, axis=0, return_index=True)
+    source_regions = [region_id for values, _, region_id in nonempty for _ in values]
+    _, first_indices, inverse = np.unique(points, axis=0, return_index=True, return_inverse=True)
+    memberships: list[list[str]] = [[] for _ in range(int(np.max(inverse)) + 1)]
+    for group_index, region_id in zip(inverse, source_regions, strict=True):
+        if region_id not in memberships[group_index]:
+            memberships[group_index].append(region_id)
     retained = np.sort(first_indices)
-    return points[retained], normals[retained]
+    region_ids = tuple("+".join(memberships[inverse[index]]) for index in retained)
+    return points[retained], normals[retained], region_ids
 
 
 def _target_metadata_for_points(
@@ -206,6 +223,7 @@ def sample_organs(
         meshes["stomach"].vertex_normals,
         target_meshes,
         settings.ray_length_mm,
+        settings.ray_batch_size,
     )
     stomach_valid = _valid_ordinary_indices(
         stomach_rays.points,
@@ -226,9 +244,13 @@ def sample_organs(
         meshes["inferior_vena_cava"].vertices,
         meshes["pancreas"].vertices,
     )
-    liver_points, liver_normals = _merge_unique(liver_one, liver_two)
+    liver_points, liver_normals, liver_region_ids = _merge_unique(
+        (*liver_one, "liver_region_one"),
+        (*liver_two, "liver_region_two"),
+    )
     liver_valid = _valid_ordinary_indices(liver_points, liver_normals, esophagus_anchor, reverse_normal=True)
     liver_points, liver_normals = liver_points[liver_valid], liver_normals[liver_valid]
+    liver_region_ids = tuple(liver_region_ids[index] for index in liver_valid)
     pancreas_points, pancreas_normals = filter_pancreas_points(
         meshes["pancreas"].vertices,
         meshes["pancreas"].vertex_normals,
@@ -241,6 +263,7 @@ def sample_organs(
         meshes["duodenum"].vertex_normals,
         target_meshes,
         settings.ray_length_mm,
+        settings.ray_batch_size,
     )
     duodenum_valid = _valid_duodenum_indices(duodenum_rays.points, duodenum_rays.normals, centerline)
     duodenum_points = duodenum_rays.points[duodenum_valid]
@@ -278,6 +301,7 @@ def sample_organs(
         esophagus_normals,
         target_meshes,
         settings.ray_length_mm,
+        settings.ray_batch_size,
     )
 
     duodenum_upper = _sample(
@@ -363,6 +387,7 @@ def sample_organs(
             seed + 1,
             settings.minimum_spacing_mm,
             "liver",
+            region_ids=liver_region_ids,
             zero_plane_anchor_world=esophagus_anchor,
         ),
         "pancreas": _sample(
@@ -404,7 +429,7 @@ def _yaw_policy(
 ) -> str:
     if region_id == "duodenum_bulb":
         return DUODENUM_BULB_YAW
-    is_pancreas_source = organ == "pancreas" or "pancreas" in target_ids
+    is_pancreas_source = organ == "pancreas" or (organ == "stomach" and "pancreas" in target_ids)
     if is_pancreas_source:
         if pancreas_special_x_limit is None:
             raise ValueError(f"{organ} 缺少胰腺特殊区的腹主动脉最大 x")
@@ -417,39 +442,58 @@ def _source_priority(sample: SquareSample) -> int:
     return 1 if sample.organ in {"liver", "pancreas"} or "supplement" in sample.source_region else 0
 
 
-def _deduplicate_exact_poses(samples: list[SquareSample]) -> list[SquareSample]:
-    if len(samples) < 2:
-        return samples
-    flattened = np.asarray([sample.vertices.reshape(-1) for sample in samples], dtype=np.float64)
+def _deduplication_plan(
+    flattened: np.ndarray,
+    priorities: np.ndarray,
+    source_regions: list[str],
+) -> tuple[np.ndarray, dict[int, tuple[str, ...]]]:
+    keep = np.ones(len(flattened), dtype=bool)
+    if len(flattened) < 2:
+        return keep, {}
     pairs = cKDTree(flattened).query_pairs(r=1e-9, p=np.inf, output_type="ndarray")
     if not len(pairs):
-        return samples
-    neighbours: list[list[int]] = [[] for _ in samples]
+        return keep, {}
+    neighbours: list[list[int]] = [[] for _ in flattened]
     for first, second in pairs:
         neighbours[int(first)].append(int(second))
         neighbours[int(second)].append(int(first))
-    removed = np.zeros(len(samples), dtype=bool)
-    retained: dict[int, SquareSample] = {}
-    for winner in sorted(range(len(samples)), key=lambda index: (_source_priority(samples[index]), index)):
-        if removed[winner]:
+    duplicate_regions: dict[int, tuple[str, ...]] = {}
+    for winner in sorted(range(len(flattened)), key=lambda index: (int(priorities[index]), index)):
+        if not keep[winner]:
             continue
-        duplicates = [index for index in neighbours[winner] if not removed[index]]
-        removed[duplicates] = True
-        duplicate_regions = tuple(
+        duplicates = [index for index in neighbours[winner] if keep[index]]
+        keep[duplicates] = False
+        duplicate_regions[winner] = tuple(
             dict.fromkeys(
-                samples[index].source_region
+                source_regions[index]
                 for index in duplicates
-                if samples[index].source_region != samples[winner].source_region
+                if source_regions[index] != source_regions[winner]
             )
         )
-        retained[winner] = replace(samples[winner], duplicate_source_regions=duplicate_regions)
-    return [retained[index] for index in sorted(retained)]
+    return keep, duplicate_regions
 
 
-def generate_square_samples(surfaces: Mapping[str, SurfaceSamples], settings: SquareConfig) -> list[SquareSample]:
-    """按局部三轴语义生成姿态，并严格合并完全相同的四顶点。"""
+def _deduplicate_exact_poses(samples: list[SquareSample]) -> list[SquareSample]:
+    if not samples:
+        return samples
+    flattened = np.asarray([sample.vertices.reshape(-1) for sample in samples], dtype=np.float64)
+    priorities = np.asarray([_source_priority(sample) for sample in samples], dtype=np.uint8)
+    keep, duplicate_regions = _deduplication_plan(
+        flattened,
+        priorities,
+        [sample.source_region for sample in samples],
+    )
+    return [
+        replace(sample, duplicate_source_regions=duplicate_regions.get(index, ()))
+        for index, sample in enumerate(samples)
+        if keep[index]
+    ]
 
-    samples: list[SquareSample] = []
+
+def _iter_pose_candidates(
+    surfaces: Mapping[str, SurfaceSamples],
+    settings: SquareConfig,
+) -> Iterator[SquareSample]:
     pose_organ_order = ("stomach", "duodenum", "esophagus", "liver", "pancreas")
     for organ in pose_organ_order:
         surface = surfaces.get(organ, _empty_samples())
@@ -482,22 +526,86 @@ def generate_square_samples(surfaces: Mapping[str, SurfaceSamples], settings: Sq
                     f"-p{_angle_token(variant.pitch_degrees)}"
                     f"-y{_angle_token(variant.yaw_degrees)}"
                 )
-                samples.append(
-                    SquareSample(
-                        sample_id=sample_id,
-                        organ=organ,
-                        probe_point_world=np.asarray(point, dtype=np.float64),
-                        input_normal_world=np.asarray(normal, dtype=np.float64),
-                        vertices=variant.vertices,
-                        source_region=region_id,
-                        yaw_policy=yaw_policy,
-                        roll_degrees=variant.roll_degrees,
-                        pitch_degrees=variant.pitch_degrees,
-                        yaw_degrees=variant.yaw_degrees,
-                        local_x_world=variant.local_frame.x_axis,
-                        local_y_world=variant.local_frame.y_axis,
-                        local_z_world=variant.local_frame.z_axis,
-                        target_ids=target_ids,
-                    )
+                yield SquareSample(
+                    sample_id=sample_id,
+                    organ=organ,
+                    probe_point_world=np.asarray(point, dtype=np.float64),
+                    input_normal_world=np.asarray(normal, dtype=np.float64),
+                    vertices=variant.vertices,
+                    source_region=region_id,
+                    yaw_policy=yaw_policy,
+                    roll_degrees=variant.roll_degrees,
+                    pitch_degrees=variant.pitch_degrees,
+                    yaw_degrees=variant.yaw_degrees,
+                    local_x_world=variant.local_frame.x_axis,
+                    local_y_world=variant.local_frame.y_axis,
+                    local_z_world=variant.local_frame.z_axis,
+                    target_ids=target_ids,
                 )
-    return _deduplicate_exact_poses(samples)
+
+
+def _candidate_pose_count(surfaces: Mapping[str, SurfaceSamples]) -> int:
+    count = 0
+    for organ in ("stomach", "duodenum", "esophagus", "liver", "pancreas"):
+        surface = surfaces.get(organ, _empty_samples())
+        if not len(surface.points):
+            continue
+        _validate_surface(organ, surface)
+        for point, region_id, target_ids in zip(
+            surface.points,
+            surface.region_ids,
+            surface.target_ids,
+            strict=True,
+        ):
+            yaw_policy = _yaw_policy(
+                organ,
+                region_id,
+                point,
+                target_ids,
+                surface.pancreas_special_x_limit,
+            )
+            count += len(YAW_ANGLES_DEGREES[yaw_policy]) * 9
+    return count
+
+
+class PoseStream:
+    def __init__(
+        self,
+        surfaces: Mapping[str, SurfaceSamples],
+        settings: SquareConfig,
+        keep: np.ndarray,
+        duplicate_regions: dict[int, tuple[str, ...]],
+    ):
+        self._surfaces = surfaces
+        self._settings = settings
+        self._keep = keep
+        self._duplicate_regions = duplicate_regions
+
+    def __len__(self) -> int:
+        return int(np.count_nonzero(self._keep))
+
+    def __iter__(self) -> Iterator[SquareSample]:
+        for index, sample in enumerate(_iter_pose_candidates(self._surfaces, self._settings)):
+            if self._keep[index]:
+                yield replace(
+                    sample,
+                    duplicate_source_regions=self._duplicate_regions.get(index, ()),
+                )
+
+
+def generate_square_samples(surfaces: Mapping[str, SurfaceSamples], settings: SquareConfig) -> PoseStream:
+    """构建可重复遍历的语义姿态流，并严格合并完全相同的四顶点。"""
+
+    candidate_count = _candidate_pose_count(surfaces)
+    flattened = np.empty((candidate_count, 12), dtype=np.float64)
+    priorities = np.empty(candidate_count, dtype=np.uint8)
+    source_regions: list[str] = []
+    generated_count = 0
+    for generated_count, sample in enumerate(_iter_pose_candidates(surfaces, settings), start=1):
+        flattened[generated_count - 1] = sample.vertices.reshape(-1)
+        priorities[generated_count - 1] = _source_priority(sample)
+        source_regions.append(sample.source_region)
+    if generated_count != candidate_count:
+        raise RuntimeError("姿态预估数与实际生成数不一致")
+    keep, duplicate_regions = _deduplication_plan(flattened, priorities, source_regions)
+    return PoseStream(surfaces, settings, keep, duplicate_regions)

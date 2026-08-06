@@ -61,6 +61,36 @@ def test_target_ray_records_all_intersected_organs_not_only_the_nearest():
     assert result.all_target_ids == (("liver", "pancreas"),)
 
 
+def test_target_ray_intersection_is_chunked_without_changing_results(monkeypatch):
+    target = trimesh.creation.box(
+        extents=(2.0, 10.0, 2.0),
+        transform=trimesh.transformations.translation_matrix([10.0, 0.0, 0.0]),
+    )
+    points = np.asarray([[0.0, y, 0.0] for y in (-4.0, -2.0, 0.0, 2.0, 4.0)])
+    normals = np.asarray([[1.0, 0.0, 0.0]] * len(points))
+    intersector = target.ray
+    original = intersector.intersects_location
+    batch_sizes: list[int] = []
+
+    def record_batches(ray_origins, ray_directions, multiple_hits):
+        batch_sizes.append(len(ray_origins))
+        return original(ray_origins, ray_directions, multiple_hits=multiple_hits)
+
+    monkeypatch.setattr(intersector, "intersects_location", record_batches)
+
+    result = filter_points_by_target_rays(
+        points,
+        normals,
+        {"liver": target},
+        ray_length_mm=100.0,
+        ray_batch_size=2,
+    )
+
+    assert batch_sizes == [2, 2, 1]
+    assert np.array_equal(result.points, points)
+    assert result.target_ids == ("liver",) * 5
+
+
 def test_esophagus_valid_segment_starts_at_original_minimum_z_and_ends_at_liver_maximum_z():
     esophagus_points = np.asarray([[0.0, 0.0, z] for z in (-5.0, 0.0, 5.0, 15.0)])
     esophagus_normals = np.asarray([[1.0, 0.0, 0.0]] * len(esophagus_points))

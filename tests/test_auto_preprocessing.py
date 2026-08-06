@@ -116,7 +116,7 @@ def test_auto_preprocessing_merges_legacy_portal_and_ignores_unconfigured_organ_
     config = yaml.safe_load((tmp_path / "case_preprocessed.yaml").read_text(encoding="utf-8"))
     assert result["model_count"] == 16
     assert [item["label"] for item in config["vessel_models"]] == ["artery", "vein"]
-    assert config["square"]["deduplicate_degenerate_edge_angles"] is False
+    assert config["square"] == {"side_length_mm": 100.0}
 
 
 def test_totalsegmentator_command_requests_only_required_organs(tmp_path):
@@ -178,7 +178,7 @@ def test_auto_case_config_resolves_totalsegmentator_cache_directory(tmp_path):
     assert config.totalsegmentator_cache_directory == (tmp_path / "cache" / "totalsegmentator").resolve()
 
 
-def test_auto_case_config_reads_explicit_degenerate_angle_deduplication(tmp_path):
+def test_auto_case_config_rejects_obsolete_degenerate_angle_deduplication(tmp_path):
     from ct_vascular_resampling.auto_preprocessing import load_auto_case_config
 
     config_path = _write_auto_config(
@@ -187,28 +187,8 @@ def test_auto_case_config_reads_explicit_degenerate_angle_deduplication(tmp_path
         square={"deduplicate_degenerate_edge_angles": True},
     )
 
-    config = load_auto_case_config(config_path)
-
-    assert config.deduplicate_degenerate_edge_angles is True
-
-
-def test_auto_preprocessing_propagates_explicit_degenerate_angle_deduplication(tmp_path):
-    from ct_vascular_resampling.auto_preprocessing import AUTO_ORGAN_IDS, write_auto_preprocessed_case
-
-    result = write_auto_preprocessed_case(
-        ct=_image(np.zeros((8, 8, 8), dtype=np.int16)),
-        organ_masks={name: _mask() for name in AUTO_ORGAN_IDS},
-        vascular_segmentation=_image(np.where(np.indices((8, 8, 8))[0] == 2, 1, 2).astype(np.uint8)),
-        vessel_label_values={"artery": (1,), "vein": (2,)},
-        output_directory=tmp_path,
-        registration_module_path=Path("/tmp/2021.py"),
-        case_id="auto_case",
-        total_segmentator_metadata={"task": "total"},
-        deduplicate_degenerate_edge_angles=True,
-    )
-
-    config = yaml.safe_load(Path(result["case_config_path"]).read_text(encoding="utf-8"))
-    assert config["square"]["deduplicate_degenerate_edge_angles"] is True
+    with pytest.raises(ValueError, match="deduplicate_degenerate_edge_angles|不支持"):
+        load_auto_case_config(config_path)
 
 
 @pytest.mark.parametrize(

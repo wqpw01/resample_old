@@ -9,10 +9,6 @@ vessel_label_values:
   artery: [1]
   vein: [2, 3]
 
-# 当前正式流程启用退化角去重；省略时保持兼容默认值 false。
-square:
-  deduplicate_degenerate_edge_angles: true
-
 # 既有检索引擎代码依赖，不属于病例影像输入。
 registration_module_path: ../registration/2021.py
 output_root: ../output

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 from typing import Iterable
 
 from .sampling_pipeline import SquareSample, SurfaceSamples
@@ -42,17 +43,27 @@ def write_surface_samples_ply(path: str | Path, samples: SurfaceSamples) -> None
 def write_square_samples_ply(path: str | Path, samples: Iterable[SquareSample]) -> None:
     """写出连续四顶点、无 face 的 ASCII PLY。"""
 
-    values = list(samples)
     destination = Path(path)
-    lines = [
-        "ply",
-        "format ascii 1.0",
-        f"element vertex {len(values) * 4}",
-        "property float x",
-        "property float y",
-        "property float z",
-        "end_header",
-    ]
-    for sample in values:
-        lines.extend(f"{vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}" for vertex in sample.vertices)
-    _atomic_write(destination, "\n".join(lines) + "\n")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    body = destination.with_name(f".{destination.name}.body.tmp")
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    sample_count = 0
+    try:
+        with body.open("w", encoding="utf-8", newline="\n") as handle:
+            for sample in samples:
+                for vertex in sample.vertices:
+                    handle.write(f"{vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
+                sample_count += 1
+        with temporary.open("w", encoding="utf-8", newline="\n") as output, body.open(
+            "r", encoding="utf-8"
+        ) as source:
+            output.write(
+                "ply\nformat ascii 1.0\n"
+                f"element vertex {sample_count * 4}\n"
+                "property float x\nproperty float y\nproperty float z\nend_header\n"
+            )
+            shutil.copyfileobj(source, output)
+        os.replace(temporary, destination)
+    finally:
+        body.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)

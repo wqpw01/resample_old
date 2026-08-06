@@ -102,7 +102,6 @@ def _case_config(
     case_id: str,
     registration_module_path: Path,
     output_root: str = "resampling_output",
-    deduplicate_degenerate_edge_angles: bool = False,
 ) -> dict:
     organ_models = {
         name: f"models/{name}.ply"
@@ -129,15 +128,13 @@ def _case_config(
                 "esophagus": 200,
             },
             "ray_length_mm": 100.0,
+            "ray_batch_size": 2048,
             "minimum_spacing_mm": 10.0,
             "centerline_voxel_pitch_mm": 1.0,
             "centerline_tangent_window_mm": 10.0,
             "centerline_max_terminal_spur_mm": 5.0,
         },
-        "square": {
-            "side_length_mm": 100.0,
-            "deduplicate_degenerate_edge_angles": deduplicate_degenerate_edge_angles,
-        },
+        "square": {"side_length_mm": 100.0},
         "ct": {"output_resolution": 300, "window_level": 40.0, "window_width": 400.0, "fill_hu_value": -1000.0},
         "filtering": {
             "black_threshold": 50,
@@ -160,7 +157,6 @@ def write_preprocessed_masks_case(
     output_root: str = "resampling_output",
     provenance: Mapping[str, object] | None = None,
     manifest_metadata: Mapping[str, object] | None = None,
-    deduplicate_degenerate_edge_angles: bool = False,
 ) -> dict[str, object]:
     """将已对齐的命名掩膜转换为下游所需网格和病例 YAML。"""
 
@@ -234,7 +230,6 @@ def write_preprocessed_masks_case(
                 case_id,
                 Path(registration_module_path),
                 output_root=output_root,
-                deduplicate_degenerate_edge_angles=deduplicate_degenerate_edge_angles,
             ),
             allow_unicode=True,
             sort_keys=False,

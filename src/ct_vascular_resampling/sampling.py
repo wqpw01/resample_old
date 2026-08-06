@@ -80,10 +80,13 @@ def filter_points_by_target_rays(
     normals: np.ndarray,
     targets: Mapping[str, trimesh.Trimesh],
     ray_length_mm: float,
+    ray_batch_size: int = 2048,
 ) -> RayFilterResult:
     point_values, normal_values = _paired_arrays(points, normals)
     if ray_length_mm <= 0.0:
         raise ValueError("ray_length_mm 必须大于零")
+    if ray_batch_size < 1:
+        raise ValueError("ray_batch_size 必须大于零")
     if not targets:
         raise ValueError("targets 不能为空")
     unit_normals = _normalised_rows(normal_values)
@@ -94,20 +97,23 @@ def filter_points_by_target_rays(
         mesh = targets[target_id]
         if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
             raise ValueError(f"目标网格无效: {target_id}")
-        locations, ray_indices, _ = mesh.ray.intersects_location(
-            ray_origins=point_values,
-            ray_directions=unit_normals,
-            multiple_hits=True,
-        )
-        if not len(locations):
-            continue
-        distances = np.einsum("ij,ij->i", locations - point_values[ray_indices], unit_normals[ray_indices])
-        valid = (distances > 1e-6) & (distances <= ray_length_mm + 1e-9)
-        for ray_index, distance in zip(ray_indices[valid], distances[valid], strict=True):
-            all_targets[int(ray_index)].add(target_id)
-            if distance < best_distances[ray_index]:
-                best_distances[ray_index] = float(distance)
-                best_targets[ray_index] = target_id
+        for start in range(0, len(point_values), ray_batch_size):
+            stop = min(start + ray_batch_size, len(point_values))
+            locations, local_ray_indices, _ = mesh.ray.intersects_location(
+                ray_origins=point_values[start:stop],
+                ray_directions=unit_normals[start:stop],
+                multiple_hits=True,
+            )
+            if not len(locations):
+                continue
+            ray_indices = local_ray_indices + start
+            distances = np.einsum("ij,ij->i", locations - point_values[ray_indices], unit_normals[ray_indices])
+            valid = (distances > 1e-6) & (distances <= ray_length_mm + 1e-9)
+            for ray_index, distance in zip(ray_indices[valid], distances[valid], strict=True):
+                all_targets[int(ray_index)].add(target_id)
+                if distance < best_distances[ray_index]:
+                    best_distances[ray_index] = float(distance)
+                    best_targets[ray_index] = target_id
     keep = np.isfinite(best_distances)
     return RayFilterResult(
         point_values[keep],

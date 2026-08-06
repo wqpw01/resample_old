@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import cache
+import hashlib
+from itertools import islice
 import json
 import os
 from pathlib import Path
+import subprocess
 from typing import Iterable
 
 import numpy as np
@@ -32,6 +36,186 @@ from .quality import evaluate_ct_quality
 from .resampling_backend import CachedCpuBackend, create_sampling_backend, validate_backend_against_cpu
 from .rendering import OrganLayer, VesselLayer, render_sample_images
 from .sampling_pipeline import ORGAN_ORDER, SquareSample, SurfaceSamples, generate_square_samples, sample_organs
+from .squares import PITCH_ANGLES_DEGREES, ROLL_ANGLES_DEGREES, YAW_ANGLES_DEGREES
+
+
+CORE_DESIGN_SHA256 = "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
+
+
+@cache
+def _build_git_commit() -> str:
+    candidate = os.environ.get("CT_VASCULAR_RESAMPLING_GIT_COMMIT", "").strip().lower()
+    if not candidate:
+        repository = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        candidate = result.stdout.strip().lower()
+    if len(candidate) != 40 or any(character not in "0123456789abcdef" for character in candidate):
+        raise RuntimeError("无法确定有效的构建 Git commit")
+    return candidate
+
+
+def _pose_metadata(sample: SquareSample) -> dict[str, object]:
+    def optional_vector(value: np.ndarray | None) -> list[float] | None:
+        return None if value is None else [float(item) for item in np.asarray(value, dtype=np.float64)]
+
+    return {
+        "coordinate_system": "RAS",
+        "core_design_sha256": CORE_DESIGN_SHA256,
+        "build_git_commit": _build_git_commit(),
+        "source_region": sample.source_region,
+        "yaw_policy": sample.yaw_policy,
+        "angles_degrees": {
+            "roll": float(sample.roll_degrees),
+            "pitch": float(sample.pitch_degrees),
+            "yaw": float(sample.yaw_degrees),
+        },
+        "local_axes_world": {
+            "x": optional_vector(sample.local_x_world),
+            "y": optional_vector(sample.local_y_world),
+            "z": optional_vector(sample.local_z_world),
+        },
+        "target_ids": list(sample.target_ids),
+        "duplicate_source_regions": list(sample.duplicate_source_regions),
+    }
+
+
+def _sha256_path(path: Path) -> str:
+    source = path.resolve()
+    digest = hashlib.sha256()
+    if source.is_file():
+        digest.update(b"file\0")
+        with source.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+    if source.is_dir():
+        digest.update(b"directory\0")
+        files = sorted(candidate for candidate in source.rglob("*") if candidate.is_file())
+        for candidate in files:
+            relative = candidate.relative_to(source).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            with candidate.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+        return digest.hexdigest()
+    raise FileNotFoundError(f"输入路径不存在: {source}")
+
+
+def _input_provenance(config: CaseConfig) -> dict[str, object]:
+    cache: dict[Path, dict[str, object]] = {}
+
+    def describe(path: Path) -> dict[str, object]:
+        resolved = path.resolve()
+        if resolved not in cache:
+            cache[resolved] = {
+                "path": str(resolved),
+                "kind": "directory" if resolved.is_dir() else "file",
+                "sha256": _sha256_path(resolved),
+            }
+        return dict(cache[resolved])
+
+    ct = describe(config.ct_path)
+    ct["dicom_series_uid"] = config.dicom_series_uid
+    return {
+        "ct": ct,
+        "organ_models": {
+            identifier: describe(path) for identifier, path in sorted(config.organ_models.items())
+        },
+        "vessel_models": [
+            {
+                "id": vessel.identifier,
+                "label": vessel.label,
+                "color": list(vessel.color),
+                **describe(vessel.path),
+            }
+            for vessel in config.vessel_models
+        ],
+    }
+
+
+def _run_protocol_metadata(config: CaseConfig) -> dict[str, object]:
+    protocol: dict[str, object] = {
+        "coordinate_system": config.geometry.canonical_coordinate_system,
+        "input_coordinate_system": config.geometry.input_coordinate_system,
+        "core_design_sha256": CORE_DESIGN_SHA256,
+        "build_git_commit": _build_git_commit(),
+        "input_provenance": _input_provenance(config),
+        "sampling_configuration": {
+            "point_counts": dict(sorted(config.sampling.point_counts.items())),
+            "ray_length_mm": config.sampling.ray_length_mm,
+            "ray_batch_size": config.sampling.ray_batch_size,
+            "minimum_spacing_mm": config.sampling.minimum_spacing_mm,
+            "centerline_voxel_pitch_mm": config.sampling.centerline_voxel_pitch_mm,
+            "centerline_tangent_window_mm": config.sampling.centerline_tangent_window_mm,
+            "centerline_max_terminal_spur_mm": config.sampling.centerline_max_terminal_spur_mm,
+            "seed": config.runtime.seed,
+        },
+        "minimum_point_spacing_mm": config.sampling.minimum_spacing_mm,
+        "pose_angles_degrees": {
+            "roll": list(ROLL_ANGLES_DEGREES),
+            "pitch": list(PITCH_ANGLES_DEGREES),
+            "yaw": {name: list(values) for name, values in YAW_ANGLES_DEGREES.items()},
+        },
+        "square_sampling": {
+            "side_length_mm": config.square.side_length_mm,
+            "output_resolution": [config.ct.output_resolution, config.ct.output_resolution],
+            "interpolation": "cubic_bspline",
+            "interpolation_order": 3,
+            "window_level_hu": config.ct.window_level,
+            "window_width_hu": config.ct.window_width,
+            "fill_hu_value": config.ct.fill_hu_value,
+        },
+        "quality_filtering": {
+            "black_threshold": config.filtering.black_threshold,
+            "black_ratio_limit": config.filtering.black_ratio_limit,
+            "line_min_diagonal_fraction": config.filtering.line_min_diagonal_fraction,
+            "black_side_min_ratio": config.filtering.black_side_min_ratio,
+            "valid_side_max_black_ratio": config.filtering.valid_side_max_black_ratio,
+        },
+        "fov_policy": {
+            "vertex_rule": "any_square_vertex_outside_ct",
+            "outside_status": "excluded_fov",
+            "saved_artifacts": ["ct_png"],
+            "out_of_bounds_png_value": 0,
+        },
+    }
+    canonical = json.dumps(protocol, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    protocol["resume_protocol_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return protocol
+
+
+def _validate_completed_pose(sample: SquareSample, record: dict | None) -> None:
+    if record is None:
+        raise ValueError(f"姿态 {sample.sample_id} 有完成状态但缺少根清单记录")
+    frame = frame_from_vertices(sample.vertices)
+    expected = {
+        "organ": sample.organ,
+        "probe_point_world": [float(value) for value in sample.probe_point_world],
+        "input_normal_world": [float(value) for value in sample.input_normal_world],
+        "square_vertices_world": [
+            [float(value) for value in vertex] for vertex in np.asarray(sample.vertices, dtype=np.float64)
+        ],
+        "width_mm": float(frame.width_mm),
+        "length_mm": float(frame.length_mm),
+        **_pose_metadata(sample),
+    }
+    mismatches = [field for field, value in expected.items() if record.get(field) != value]
+    if mismatches:
+        raise ValueError(
+            f"姿态 {sample.sample_id} 的既有几何或位姿元数据不一致: {', '.join(mismatches)}；请使用新的输出目录"
+        )
+
+
+def _batched(values: Iterable[SquareSample], size: int) -> Iterable[tuple[SquareSample, ...]]:
+    iterator = iter(values)
+    while batch := tuple(islice(iterator, size)):
+        yield batch
 
 
 @dataclass(frozen=True)
@@ -91,6 +275,7 @@ def _render_fov_exclusion_if_needed(
         fov_diagnostics=diagnosis.to_record(),
         ct_image=Image.fromarray(ct_pixels),
         resampling_backend=resampling_backend,
+        pose_metadata=_pose_metadata(sample),
     )
 
 
@@ -203,6 +388,7 @@ def render_precomputed_square(
         quality=quality,
         resampling_backend=resampling_backend,
         fov_diagnostics=fov_diagnostics,
+        pose_metadata=_pose_metadata(sample),
     )
 
 
@@ -267,29 +453,66 @@ def run_case(
     if has_run_artifacts and not resume and selected & {"sample", "square", "render"}:
         raise FileExistsError(f"输出目录已有内容，请启用恢复模式: {case_directory}")
     statuses: Counter[str] = Counter()
+    protocol_metadata = _run_protocol_metadata(config)
+    writer: GalleryWriter | None = None
+    calibration_samples: list[SquareSample] = []
+    if "render" in selected:
+        writer = GalleryWriter(
+            case_directory,
+            config.case_id,
+            required_core_design_sha256=CORE_DESIGN_SHA256,
+        )
+        if writer.completed_statuses:
+            metadata_path = case_directory / "run_metadata.json"
+            if not metadata_path.is_file():
+                raise ValueError("已有完成姿态但缺少 run_metadata.json，无法验证恢复运行协议")
+            try:
+                previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as error:
+                raise ValueError(f"无法读取既有运行元数据: {error}") from error
+            if previous_metadata.get("resume_protocol_sha256") != protocol_metadata["resume_protocol_sha256"]:
+                raise ValueError("当前配置、设计或构建与既有结果的运行协议不一致；请使用新的输出目录")
+        pending_count = 0
+        expected_pose_ids: set[str] = set()
+        for sample in samples:
+            if sample.sample_id in expected_pose_ids:
+                raise ValueError(f"当前姿态流包含重复 ID: {sample.sample_id}")
+            expected_pose_ids.add(sample.sample_id)
+            completed = writer.completed_status(sample.sample_id)
+            if completed is None:
+                pending_count += 1
+                if len(calibration_samples) < 64:
+                    calibration_samples.append(sample)
+            else:
+                _validate_completed_pose(sample, writer.completed_record(sample.sample_id))
+                statuses[completed] += 1
+        stale_pose_ids = set(writer.completed_statuses) - expected_pose_ids
+        if stale_pose_ids:
+            preview = ", ".join(sorted(stale_pose_ids)[:10])
+            raise ValueError(f"既有清单包含当前姿态集合之外的陈旧 ID: {preview}；请使用新的输出目录")
+        if pending_count == 0:
+            if sum(statuses.values()) != len(samples):
+                raise RuntimeError(f"姿态状态计数不完整: {sum(statuses.values())}/{len(samples)}")
+            selected.remove("render")
     if "sample" in selected:
         for organ in ORGAN_ORDER:
             surface = surfaces.get(organ, SurfaceSamples([], []))
             write_surface_samples_ply(case_directory / "ResampledpointPLY" / f"FPS-{_legacy_name(organ)}.ply", surface)
     if "square" in selected:
         for organ in ORGAN_ORDER:
-            organ_squares = [sample for sample in samples if sample.organ == organ]
+            organ_squares = (sample for sample in samples if sample.organ == organ)
             write_square_samples_ply(case_directory / "squarePLY" / f"{_legacy_name(organ)}-vertex.ply", organ_squares)
-        write_rectangles_ply(case_directory / "rectangles.ply", [frame_from_vertices(sample.vertices) for sample in samples])
+        write_rectangles_ply(
+            case_directory / "rectangles.ply",
+            (frame_from_vertices(sample.vertices) for sample in samples),
+        )
     if "render" in selected:
+        assert writer is not None
         volume = load_ct(
             config.ct_path,
             dicom_series_uid=config.dicom_series_uid,
             input_coordinate_system=config.geometry.input_coordinate_system,
         )
-        writer = GalleryWriter(case_directory, config.case_id)
-        pending_samples: list[SquareSample] = []
-        for sample in samples:
-            completed = writer.completed_status(sample.sample_id)
-            if completed is not None:
-                statuses[completed] += 1
-                continue
-            pending_samples.append(sample)
         vessels = [
             PreparedVessel(
                 vessel.identifier,
@@ -320,24 +543,24 @@ def run_case(
                 "case_id": config.case_id,
                 "total_squares": len(samples),
                 "excluded_fov_count": statuses["excluded_fov"],
-                "deduplicate_degenerate_edge_angles": config.square.deduplicate_degenerate_edge_angles,
+                **protocol_metadata,
                 "calibration": None,
             }
         )
-        if backend.name != "cpu" and pending_samples:
+        if backend.name != "cpu" and calibration_samples:
             reference_backend = CachedCpuBackend(volume)
             try:
                 calibration = validate_backend_against_cpu(
                     backend,
                     reference_backend,
-                    np.asarray([sample.vertices for sample in pending_samples[:64]], dtype=np.float64),
+                    np.asarray([sample.vertices for sample in calibration_samples], dtype=np.float64),
                     resolution=config.ct.output_resolution,
                     fill_hu_value=config.ct.fill_hu_value,
                     window_level=config.ct.window_level,
                     window_width=config.ct.window_width,
                 )
             except Exception as error:
-                calibration = {"sample_count": min(64, len(samples)), "accepted": False, "error": str(error)}
+                calibration = {"sample_count": len(calibration_samples), "accepted": False, "error": str(error)}
             backend_metadata["calibration"] = calibration
             if not calibration["accepted"]:
                 message = f"GPU 后端未通过 CPU 对照校验: {calibration}"
@@ -365,23 +588,10 @@ def run_case(
                 volume=volume,
             )
 
-        def render_cpu_one(sample: SquareSample) -> str:
-            hu = backend.sample_many(
-                np.asarray([sample.vertices], dtype=np.float64),
-                config.ct.output_resolution,
-                config.ct.fill_hu_value,
-            )[0]
-            return render_precomputed_square(
-                sample,
-                hu,
-                vessels,
-                config.ct,
-                config.filtering,
-                writer,
-                organs=organs,
-                resampling_backend=backend.name,
-                volume=volume,
-            )
+        def pending_samples() -> Iterable[SquareSample]:
+            for sample in samples:
+                if writer.completed_status(sample.sample_id) is None:
+                    yield sample
 
         try:
             if effective_workers == 1:
@@ -391,16 +601,20 @@ def run_case(
             try:
                 if backend.name == "cpu":
                     cpu_batch_size = effective_workers * 4
-                    for start in range(0, len(pending_samples), cpu_batch_size):
-                        batch = pending_samples[start : start + cpu_batch_size]
+                    for batch in _batched(pending_samples(), cpu_batch_size):
+                        hu_batch = backend.sample_many(
+                            np.asarray([sample.vertices for sample in batch], dtype=np.float64),
+                            config.ct.output_resolution,
+                            config.ct.fill_hu_value,
+                        )
+                        items = [(sample, hu, backend.name) for sample, hu in zip(batch, hu_batch, strict=True)]
                         if executor is None:
-                            statuses.update(render_cpu_one(sample) for sample in batch)
+                            statuses.update(render_one(item) for item in items)
                         else:
-                            statuses.update(executor.map(render_cpu_one, batch))
+                            statuses.update(executor.map(render_one, items))
                 else:
                     batch_size = config.runtime.gpu_batch_size
-                    for start in range(0, len(pending_samples), batch_size):
-                        batch = pending_samples[start : start + batch_size]
+                    for batch in _batched(pending_samples(), batch_size):
                         try:
                             hu_batch = backend.sample_many(
                                 np.asarray([sample.vertices for sample in batch], dtype=np.float64),
@@ -430,8 +644,14 @@ def run_case(
         finally:
             backend_metadata["selected_backend"] = backend.name
             backend_metadata["excluded_fov_count"] = statuses["excluded_fov"]
+            backend_metadata["completed_pose_count"] = sum(statuses.values())
+            backend_metadata["status_counts"] = dict(sorted(statuses.items()))
             _write_run_metadata(case_directory, backend_metadata)
             backend.close()
+        if sum(statuses.values()) != len(samples):
+            raise RuntimeError(
+                f"姿态状态计数不完整: {sum(statuses.values())}/{len(samples)}"
+            )
     indexed_feature_count = 0
     if "index" in selected:
         gallery_manifest = case_directory / "gallery" / "gallery.jsonl"

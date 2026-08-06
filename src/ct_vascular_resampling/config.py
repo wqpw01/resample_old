@@ -33,13 +33,6 @@ DEFAULT_POINT_COUNTS = {
     "duodenum_part2": 500,
     "esophagus": 200,
 }
-DEFAULT_SQUARE_SPECS = {
-    "stomach": (False, ("x", "y", "z")),
-    "liver": (True, ("x", "y", "z")),
-    "pancreas": (True, ("x", "y", "z")),
-    "duodenum": (False, ("x", "y", "z")),
-    "esophagus": (False, ("x",)),
-}
 VALID_VESSEL_LABEL_PAIRS = (frozenset({"portal", "hepatic"}), frozenset({"artery", "vein"}))
 DEFAULT_VESSEL_COLORS = {
     "portal": (255, 0, 255),
@@ -87,6 +80,7 @@ class VesselModel:
 class SamplingConfig:
     point_counts: dict[str, int]
     ray_length_mm: float = 100.0
+    ray_batch_size: int = 2048
     minimum_spacing_mm: float = 10.0
     centerline_voxel_pitch_mm: float = 1.0
     centerline_tangent_window_mm: float = 10.0
@@ -96,14 +90,6 @@ class SamplingConfig:
 @dataclass(frozen=True)
 class SquareConfig:
     side_length_mm: float = 100.0
-    specs: dict[str, tuple[bool, tuple[str, ...]]] | None = None
-    deduplicate_degenerate_edge_angles: bool = False
-
-    def spec_for(self, organ: str) -> tuple[bool, tuple[str, ...]]:
-        values = (self.specs or DEFAULT_SQUARE_SPECS).get(organ)
-        if values is None:
-            raise ValueError(f"没有 {organ} 的方形采样配置")
-        return values
 
 
 @dataclass(frozen=True)
@@ -190,13 +176,6 @@ def _ratio(value: Any, field: str, default: float, allow_zero: bool = True) -> f
     return result
 
 
-def _boolean(value: Any, field: str, default: bool) -> bool:
-    result = default if value is None else value
-    if not isinstance(result, bool):
-        raise ValueError(f"{field} 必须是布尔值")
-    return result
-
-
 def _color(value: Any, identifier: str) -> tuple[int, int, int]:
     if value is None:
         return DEFAULT_VESSEL_COLORS[identifier]
@@ -240,6 +219,18 @@ def _load_vessels(raw: Any, config_directory: Path) -> tuple[VesselModel, ...]:
 
 def _load_sampling(raw: Any) -> SamplingConfig:
     values = _mapping(raw or {}, "sampling")
+    supported = {
+        "point_counts",
+        "ray_length_mm",
+        "ray_batch_size",
+        "minimum_spacing_mm",
+        "centerline_voxel_pitch_mm",
+        "centerline_tangent_window_mm",
+        "centerline_max_terminal_spur_mm",
+    }
+    unexpected = set(values) - supported
+    if unexpected:
+        raise ValueError(f"sampling 包含不支持的配置: {', '.join(sorted(unexpected))}")
     counts = dict(DEFAULT_POINT_COUNTS)
     supplied = values.get("point_counts", {})
     if not isinstance(supplied, dict):
@@ -251,6 +242,7 @@ def _load_sampling(raw: Any) -> SamplingConfig:
     return SamplingConfig(
         point_counts=counts,
         ray_length_mm=_number(values.get("ray_length_mm"), "sampling.ray_length_mm", 100.0),
+        ray_batch_size=_integer(values.get("ray_batch_size"), "sampling.ray_batch_size", 2048),
         minimum_spacing_mm=_number(values.get("minimum_spacing_mm"), "sampling.minimum_spacing_mm", 10.0),
         centerline_voxel_pitch_mm=_number(
             values.get("centerline_voxel_pitch_mm"), "sampling.centerline_voxel_pitch_mm", 1.0
@@ -277,16 +269,11 @@ def _load_geometry(raw: Any) -> GeometryConfig:
 
 def _load_square(raw: Any) -> SquareConfig:
     values = _mapping(raw or {}, "square")
+    unexpected = set(values) - {"side_length_mm"}
+    if unexpected:
+        raise ValueError(f"square 包含不支持的配置: {', '.join(sorted(unexpected))}")
     side_length = _number(values.get("side_length_mm"), "square.side_length_mm", 100.0)
-    return SquareConfig(
-        side_length_mm=side_length,
-        specs=dict(DEFAULT_SQUARE_SPECS),
-        deduplicate_degenerate_edge_angles=_boolean(
-            values.get("deduplicate_degenerate_edge_angles"),
-            "square.deduplicate_degenerate_edge_angles",
-            False,
-        ),
-    )
+    return SquareConfig(side_length_mm=side_length)
 
 
 def _load_ct(raw: Any) -> CTConfig:
