@@ -18,6 +18,60 @@ class RayFilterResult:
     distances_mm: np.ndarray
 
 
+@dataclass(frozen=True)
+class SamplingStatistics:
+    requested_count: int
+    candidate_count: int
+    actual_count: int
+    minimum_spacing_mm: float
+    actual_minimum_distance_mm: float | None
+
+
+@dataclass(frozen=True)
+class SamplingResult:
+    points: np.ndarray
+    normals: np.ndarray
+    stats: SamplingStatistics
+
+
+def sample_points_with_minimum_spacing(
+    points: np.ndarray,
+    normals: np.ndarray,
+    count: int,
+    seed: int,
+    minimum_spacing_mm: float,
+) -> SamplingResult:
+    point_values, normal_values = _paired_arrays(points, normals)
+    if count < 0:
+        raise ValueError("count 不能为负数")
+    if minimum_spacing_mm <= 0.0:
+        raise ValueError("minimum_spacing_mm 必须大于零")
+    selected: list[int] = []
+    if count and len(point_values):
+        distances = np.full(len(point_values), np.inf, dtype=np.float64)
+        current = int(np.random.default_rng(seed).integers(len(point_values)))
+        while len(selected) < min(count, len(point_values)):
+            selected.append(current)
+            distances = np.minimum(distances, np.linalg.norm(point_values - point_values[current], axis=1))
+            distances[selected] = -np.inf
+            if len(selected) >= min(count, len(point_values)):
+                break
+            current = int(np.argmax(distances))
+            if distances[current] < minimum_spacing_mm - 1e-9:
+                break
+    indices = np.asarray(selected, dtype=np.int64)
+    sampled_points = point_values[indices]
+    sampled_normals = normal_values[indices]
+    actual_minimum: float | None = None
+    if len(sampled_points) >= 2:
+        actual_minimum = float(np.min(cKDTree(sampled_points).query(sampled_points, k=2)[0][:, 1]))
+    return SamplingResult(
+        sampled_points,
+        sampled_normals,
+        SamplingStatistics(count, len(point_values), len(sampled_points), minimum_spacing_mm, actual_minimum),
+    )
+
+
 def filter_points_by_target_rays(
     points: np.ndarray,
     normals: np.ndarray,
@@ -247,22 +301,33 @@ def build_esophagus_samples(
     normals: np.ndarray,
     count: int,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """将食管候选按原/下移两组重排，同时严格保持目标数量。"""
+    minimum_spacing_mm: float = 0.0,
+) -> SamplingResult:
+    """复制整个有效食管段后执行区域内 10 mm 约束采样。"""
 
-    sampled_points, sampled_normals = sample_points_with_normals(points, normals, count=count, seed=seed)
-    total = len(sampled_points)
-    if total == 0:
-        return sampled_points, sampled_normals
-    half_height = (float(np.max(sampled_points[:, 2])) - float(np.min(sampled_points[:, 2]))) / 2.0
-    original_count = (total + 1) // 2
-    translated_count = total - original_count
-    original_indices = np.linspace(0, total - 1, original_count, dtype=int)
-    translated_indices = np.linspace(0, total - 1, translated_count, dtype=int) if translated_count else np.empty(0, dtype=int)
-    original_points = sampled_points[original_indices]
-    translated_points = sampled_points[translated_indices].copy()
-    translated_points[:, 2] -= half_height
-    return (
-        np.vstack([original_points, translated_points]),
-        np.vstack([sampled_normals[original_indices], sampled_normals[translated_indices]]),
+    point_values, normal_values = _paired_arrays(points, normals)
+    if len(point_values) == 0:
+        return sample_points_with_minimum_spacing(
+            point_values, normal_values, count, seed, minimum_spacing_mm
+        )
+    span = float(np.max(point_values[:, 2]) - np.min(point_values[:, 2]))
+    if span < 1e-8:
+        raise ValueError("食管有效段的 z 跨度必须大于零")
+    translated_points = point_values.copy()
+    translated_points[:, 2] -= span
+    combined_points = np.vstack([point_values, translated_points])
+    combined_normals = np.vstack([normal_values, normal_values])
+    retained: list[int] = []
+    for index, point in enumerate(combined_points):
+        if not retained or not np.any(
+            np.all(np.isclose(combined_points[retained], point, rtol=0.0, atol=1e-9), axis=1)
+        ):
+            retained.append(index)
+    retained_indices = np.asarray(retained, dtype=np.int64)
+    return sample_points_with_minimum_spacing(
+        combined_points[retained_indices],
+        combined_normals[retained_indices],
+        count,
+        seed,
+        minimum_spacing_mm,
     )

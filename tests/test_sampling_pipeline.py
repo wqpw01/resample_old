@@ -71,3 +71,5 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(tmp_path)
 
     assert set(samples) == {"stomach", "liver", "pancreas", "duodenum", "esophagus"}
     assert all(len(value.points) == len(value.normals) and len(value.points) > 0 for value in samples.values())
+    assert samples["stomach"].sampling_statistics["stomach"].minimum_spacing_mm == 10.0
+    assert set(samples["duodenum"].sampling_statistics) == {"duodenum_bulb", "duodenum_remainder"}

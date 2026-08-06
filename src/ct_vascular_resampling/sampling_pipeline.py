@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -18,7 +18,8 @@ from .sampling import (
     filter_liver_region_two_points,
     filter_pancreas_points,
     filter_points_by_target_rays,
-    sample_points_with_normals,
+    SamplingStatistics,
+    sample_points_with_minimum_spacing,
 )
 from .squares import generate_sampling_squares
 
@@ -43,6 +44,7 @@ TARGET_ORGANS = (
 class SurfaceSamples:
     points: np.ndarray
     normals: np.ndarray
+    sampling_statistics: dict[str, SamplingStatistics] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -58,11 +60,22 @@ def _empty_samples() -> SurfaceSamples:
     return SurfaceSamples(np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.float64))
 
 
-def _sample(points: np.ndarray, normals: np.ndarray, count: int, seed: int) -> SurfaceSamples:
-    if len(points) == 0:
-        return _empty_samples()
-    sampled_points, sampled_normals = sample_points_with_normals(points, normals, count=count, seed=seed)
-    return SurfaceSamples(sampled_points, sampled_normals)
+def _sample(
+    points: np.ndarray,
+    normals: np.ndarray,
+    count: int,
+    seed: int,
+    minimum_spacing_mm: float,
+    region_id: str,
+) -> SurfaceSamples:
+    result = sample_points_with_minimum_spacing(
+        points,
+        normals,
+        count=count,
+        seed=seed,
+        minimum_spacing_mm=minimum_spacing_mm,
+    )
+    return SurfaceSamples(result.points, result.normals, {region_id: result.stats})
 
 
 def _merge_unique(*pairs: tuple[np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
@@ -150,35 +163,65 @@ def sample_organs(
         duodenum_upper_normals,
         settings.point_counts["duodenum_part1"],
         seed + 3,
+        settings.minimum_spacing_mm,
+        "duodenum_bulb",
     )
     duodenum_remainder = _sample(
         duodenum_remainder_points,
         duodenum_remainder_normals,
         settings.point_counts["duodenum_part2"],
         seed + 4,
+        settings.minimum_spacing_mm,
+        "duodenum_remainder",
     )
     if len(duodenum_upper.points) or len(duodenum_remainder.points):
         duodenum = SurfaceSamples(
             np.vstack([duodenum_upper.points, duodenum_remainder.points]),
             np.vstack([duodenum_upper.normals, duodenum_remainder.normals]),
+            {**duodenum_upper.sampling_statistics, **duodenum_remainder.sampling_statistics},
         )
     else:
         duodenum = _empty_samples()
     if len(esophagus_rays.points):
+        esophagus_result = build_esophagus_samples(
+            esophagus_rays.points,
+            esophagus_rays.normals,
+            settings.point_counts["esophagus"],
+            seed + 5,
+            settings.minimum_spacing_mm,
+        )
         esophagus = SurfaceSamples(
-            *build_esophagus_samples(
-                esophagus_rays.points,
-                esophagus_rays.normals,
-                settings.point_counts["esophagus"],
-                seed + 5,
-            )
+            esophagus_result.points,
+            esophagus_result.normals,
+            {"esophagus": esophagus_result.stats},
         )
     else:
         esophagus = _empty_samples()
     return {
-        "stomach": _sample(stomach_rays.points, stomach_rays.normals, settings.point_counts["stomach"], seed),
-        "liver": _sample(liver_points, liver_normals, settings.point_counts["liver"], seed + 1),
-        "pancreas": _sample(pancreas_points, pancreas_normals, settings.point_counts["pancreas"], seed + 2),
+        "stomach": _sample(
+            stomach_rays.points,
+            stomach_rays.normals,
+            settings.point_counts["stomach"],
+            seed,
+            settings.minimum_spacing_mm,
+            "stomach",
+        ),
+        "liver": _sample(
+            liver_points,
+            liver_normals,
+            settings.point_counts["liver"],
+            seed + 1,
+            settings.minimum_spacing_mm,
+            "liver",
+        ),
+        "pancreas": _sample(
+            pancreas_points,
+            pancreas_normals,
+            settings.point_counts["pancreas"],
+            seed + 2,
+            settings.minimum_spacing_mm,
+            "pancreas",
+        ),
         "duodenum": duodenum,
         "esophagus": esophagus,
     }

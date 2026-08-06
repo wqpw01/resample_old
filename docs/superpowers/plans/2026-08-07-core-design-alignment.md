@@ -26,10 +26,10 @@
 
 ### Task 3: Spacing, esophagus extension and centerline
 
-- [ ] Write failing tests for 10 mm constrained FPS, full-span esophagus extension and centerline topology/tangent rules.
-- [ ] Implement deterministic region-capped FPS and sampling statistics.
-- [ ] Implement the validated 1 mm duodenum skeleton path and 10 mm chord tangent.
-- [ ] Run focused and regression tests, update traceability evidence, and commit.
+- [x] Write failing tests for 10 mm constrained FPS, full-span esophagus extension and centerline topology/tangent rules.
+- [x] Implement deterministic region-capped FPS and sampling statistics.
+- [x] Implement the validated 1 mm duodenum skeleton path and 10 mm chord tangent.
+- [x] Run focused and regression tests, update traceability evidence, and commit.
 
 ### Task 4: Local frames and semantic poses
 
