@@ -52,7 +52,7 @@ ct_vascular_resampling/
 
 ### 重采样结果与检索入口
 
-一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录血管特征统计、器官标签计数和器官颜色图例。`run_metadata.json` 记录 RAS、核心设计哈希、构建 Git commit、输入文件 SHA-256、点距、中心线参数、三轴角度、方形尺寸、输出分辨率、三次插值、WL/WW、FOV 填充值、质量/FOV 策略、实际后端和四状态计数。
+一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录血管特征统计、器官标签计数和器官颜色图例。`run_metadata.json` 记录 RAS、核心设计哈希、构建 Git commit、输入文件 SHA-256、点距、中心线参数与人工端点选择证据、三轴角度、方形尺寸、输出分辨率、三次插值、WL/WW、FOV 填充值、质量/FOV 策略、实际后端和四状态计数。
 
 每个 gallery 帧继续生成 `ct/`、白底仅血管 `boundary_only/` 和 CT 血管叠加 `ct_overlay/`，并新增白底 `organ_vessel_boundary/`：11 类非血管器官先按固定颜色绘制，血管再按原配置颜色覆盖绘制。对应 JSONL 记录新增 `organ_vessel_boundary_png` 和排序去重的 `organ_labels`；器官标签不写入血管 `features`，因此不改变图库状态或 `2021.py` 的血管检索语义。`unindexed`、`rejected` 和 `excluded_fov` 不生成该图，也不写这两个字段。
 
@@ -82,12 +82,12 @@ python main.py --case-config configs/case.yaml --workers 8
 
 - 胃、食管和十二指肠沿表面外法线发出最长 100 mm 射线，只保留命中 11 个目标结构之一的候选；射线按默认 2048 条分块，分块只降低内存峰值，不改变几何结果。
 - 配置点数是区域上限，不补点。每个区域独立执行确定性 FPS，任意两个实际采样点的 RAS 欧氏距离至少 10 mm；“采样点间隔 1 cm”不表示切面内部像素间距。
-- 食管有效段从原始食管最小 z 到肝脏最大 z，并按完整有效段 z 跨度向下复制。肝脏一、二区合并采样时逐点保留 `liver_region_one`、`liver_region_two` 或重叠组合来源。十二指肠以 1 mm 体素骨架得到近端到远端中心线，中心线只用于定义十二指肠 0 度面和 10 mm 弦切向，不改变 CT 或表面采样点。
+- 食管有效段从原始食管最小 z 到肝脏最大 z，并按完整有效段 z 跨度向下复制。肝脏一、二区合并采样时逐点保留 `liver_region_one`、`liver_region_two` 或重叠组合来源。十二指肠以 1 mm 体素骨架得到近端到远端中心线，中心线只用于定义十二指肠 0 度面和 10 mm 弦切向，不改变 CT 或表面采样点。若自动短毛刺规则无法得到无分叉路径，必须经人工解剖确认后以病例专属 RAS 端点锚点选取未剪枝树中的唯一路径；不得通过任意放大毛刺阈值继续运行。
 - 局部坐标为右手系，采样点位于 100 mm 方形底边中心。旋转采用局部内禀 `Z(偏航) -> Y(俯仰) -> X(滚动)`，矩阵为 `B' = B Rz Ry Rx`。
 - 滚动和俯仰均为 `-5/0/+5` 度。普通区偏航 `-30..+30`、十二指肠球部 `-90..+90`、胰腺特殊区 `-120..+30`，步长均为 5 度，对应每点 117、333、279 个姿态。
 - 四顶点在 `rtol=0, atol=1e-9 mm` 下完全相同时强制去重，基础区域优先；该行为不可通过配置关闭。样本 ID 编码来源点和 roll/pitch/yaw，支持稳定断点恢复。
 
-2026-08-07 使用导出的 case 2 真实器官网格只读验收得到 319 个采样点和 43,695 个姿态，其中普通 33,345、胰腺特殊 5,022、十二指肠球部 5,328；85 个肝点的来源为一区 33、一区/二区重叠 12、二区 40。该统计是本次输入与实现的验收结果，不是其他病例的固定数量。
+2026-08-07 使用导出的 case 2 真实器官网格只读验收得到 319 个采样点和 43,695 个姿态，其中普通 33,345、胰腺特殊 5,022、十二指肠球部 5,328；85 个肝点的来源为一区 33、一区/二区重叠 12、二区 40。病例 2 的完整十二指肠骨架为 190 节点/189 边的单连通树；用户按三平面可视化确认 E1 `[19, 24, 700]` 到 E2 `[-33, 1, 664]` 为主路径，选中 166 点、长度 224.7411 mm。以上均为本次输入与实现的验收结果，不是其他病例的固定数量或核心 DOCX 原文参数。
 
 `gallery/` 仅包含具备完整血管截面特征的可检索样本，支持 portal/hepatic 或 artery/vein 标签对；`unindexed/` 保留无血管截面的合格图像；`rejected/` 保留黑色区域或直线黑边不合格样本。使用 `ct_vascular_resampling.registration_adapter.load_gallery_database()` 可将 `gallery.jsonl` 载入外部 `2021.py` CBIR 实现。
 

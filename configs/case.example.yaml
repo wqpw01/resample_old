@@ -45,6 +45,11 @@ sampling:
   centerline_voxel_pitch_mm: 1.0
   centerline_tangent_window_mm: 10.0
   centerline_max_terminal_spur_mm: 5.0
+  # 仅在病例骨架经人工解剖确认后启用；坐标固定为 RAS mm，不能复制到其他病例。
+  # duodenum_centerline_endpoint_hints_ras_mm:
+  #   proximal: [19.0, 24.0, 700.0]
+  #   distal: [-33.0, 1.0, 664.0]
+  # duodenum_centerline_endpoint_match_tolerance_mm: 1.0
 
 square:
   side_length_mm: 100.0
