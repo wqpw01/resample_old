@@ -139,7 +139,11 @@ def _input_provenance(config: CaseConfig) -> dict[str, object]:
     }
 
 
-def _run_protocol_metadata(config: CaseConfig) -> dict[str, object]:
+def _run_protocol_metadata(
+    config: CaseConfig,
+    duodenum_centerline_selection: dict[str, object] | None,
+) -> dict[str, object]:
+    endpoint_hints = config.sampling.duodenum_centerline_endpoint_hints_ras_mm
     protocol: dict[str, object] = {
         "coordinate_system": config.geometry.canonical_coordinate_system,
         "input_coordinate_system": config.geometry.input_coordinate_system,
@@ -154,8 +158,22 @@ def _run_protocol_metadata(config: CaseConfig) -> dict[str, object]:
             "centerline_voxel_pitch_mm": config.sampling.centerline_voxel_pitch_mm,
             "centerline_tangent_window_mm": config.sampling.centerline_tangent_window_mm,
             "centerline_max_terminal_spur_mm": config.sampling.centerline_max_terminal_spur_mm,
+            "duodenum_centerline_endpoint_hints_ras_mm": (
+                {
+                    "proximal": list(endpoint_hints[0]),
+                    "distal": list(endpoint_hints[1]),
+                }
+                if endpoint_hints is not None
+                else None
+            ),
+            "duodenum_centerline_endpoint_match_tolerance_mm": (
+                config.sampling.duodenum_centerline_endpoint_match_tolerance_mm
+                if endpoint_hints is not None
+                else None
+            ),
             "seed": config.runtime.seed,
         },
+        "duodenum_centerline_selection": duodenum_centerline_selection,
         "minimum_point_spacing_mm": config.sampling.minimum_spacing_mm,
         "pose_angles_degrees": {
             "roll": list(ROLL_ANGLES_DEGREES),
@@ -443,6 +461,11 @@ def run_case(
         config.runtime.seed,
         input_coordinate_system=config.geometry.input_coordinate_system,
     )
+    duodenum_centerline = surfaces.get("duodenum", SurfaceSamples([], [])).centerline
+    selection_audit = duodenum_centerline.selection_audit if duodenum_centerline is not None else None
+    if config.sampling.duodenum_centerline_endpoint_hints_ras_mm is not None and selection_audit is None:
+        raise ValueError("病例配置了十二指肠人工端点，但采样结果缺少人工中心线选择审计")
+    centerline_selection = selection_audit.to_record() if selection_audit is not None else None
     samples = generate_square_samples(surfaces, config.square)
     sampled_counts = {organ: len(surfaces.get(organ, SurfaceSamples([], [])).points) for organ in ORGAN_ORDER}
     if dry_run:
@@ -453,7 +476,7 @@ def run_case(
     if has_run_artifacts and not resume and selected & {"sample", "square", "render"}:
         raise FileExistsError(f"输出目录已有内容，请启用恢复模式: {case_directory}")
     statuses: Counter[str] = Counter()
-    protocol_metadata = _run_protocol_metadata(config)
+    protocol_metadata = _run_protocol_metadata(config, centerline_selection)
     writer: GalleryWriter | None = None
     calibration_samples: list[SquareSample] = []
     if "render" in selected:

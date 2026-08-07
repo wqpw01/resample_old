@@ -19,6 +19,7 @@ from ct_vascular_resampling.config import (
     SquareConfig,
     VesselModel,
 )
+from ct_vascular_resampling.centerline import CenterlinePath, CenterlineSelectionAudit
 from ct_vascular_resampling.ct_resampling import CTVolume, diagnose_square_fov
 from ct_vascular_resampling.gallery import GalleryWriter
 import ct_vascular_resampling.pipeline as pipeline_module
@@ -326,12 +327,57 @@ class HMMPoseEstimator:
             VesselModel("hepatic", mesh_path, "hepatic", (0, 188, 212)),
         ),
         registration_module_path=tmp_path / "2021.py",
-        sampling=SamplingConfig(point_counts={"stomach": 1, "liver": 1, "pancreas": 1, "duodenum_part1": 1, "duodenum_part2": 1, "esophagus": 1}),
+        sampling=SamplingConfig(
+            point_counts={
+                "stomach": 1,
+                "liver": 1,
+                "pancreas": 1,
+                "duodenum_part1": 1,
+                "duodenum_part2": 1,
+                "esophagus": 1,
+            },
+            duodenum_centerline_endpoint_hints_ras_mm=(
+                (19.0, 24.0, 700.0),
+                (-33.0, 1.0, 664.0),
+            ),
+            duodenum_centerline_endpoint_match_tolerance_mm=1.0,
+        ),
         square=SquareConfig(side_length_mm=10.0),
         ct=CTConfig(output_resolution=20),
         filtering=FilterConfig(),
         runtime=RuntimeConfig(seed=0, workers=2, backend="cpu"),
         geometry=GeometryConfig(input_coordinate_system="RAS"),
+    )
+    manual_selection = CenterlineSelectionAudit(
+        mode="manual_endpoint_hints",
+        coordinate_system="RAS",
+        configured_proximal_ras_mm=(19.0, 24.0, 700.0),
+        configured_distal_ras_mm=(-33.0, 1.0, 664.0),
+        matched_proximal_ras_mm=(19.0, 24.0, 700.0),
+        matched_distal_ras_mm=(-33.0, 1.0, 664.0),
+        proximal_match_error_mm=0.0,
+        distal_match_error_mm=0.0,
+        endpoint_match_tolerance_mm=1.0,
+        path_point_count=166,
+        path_length_mm=224.7410832840096,
+        skeleton_point_count=190,
+        endpoint_count=6,
+        branchpoint_count=4,
+        connected_component_count=1,
+        excluded_node_count=24,
+        excluded_endpoints_ras_mm=(
+            (-35.0, 2.0, 661.0),
+            (-31.0, 16.0, 655.0),
+            (44.0, 1.0, 674.0),
+            (35.0, 16.0, 679.0),
+        ),
+        automatic_terminal_spur_pruning_applied=False,
+    )
+    manual_centerline = CenterlinePath(
+        np.asarray([[19.0, 24.0, 700.0], [-33.0, 1.0, 664.0]]),
+        np.asarray([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]),
+        np.asarray([0.0, 224.7410832840096]),
+        selection_audit=manual_selection,
     )
     surfaces = {
         "stomach": SurfaceSamples(
@@ -341,7 +387,12 @@ class HMMPoseEstimator:
             target_ids=(("liver",),),
             zero_plane_anchor_world=np.asarray([0.0, 0.0, 0.0]),
             pancreas_special_x_limit=100.0,
-        )
+        ),
+        "duodenum": SurfaceSamples(
+            np.empty((0, 3), dtype=np.float64),
+            np.empty((0, 3), dtype=np.float64),
+            centerline=manual_centerline,
+        ),
     }
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: surfaces)
     cpu_batch_sizes: list[int] = []
@@ -370,6 +421,15 @@ class HMMPoseEstimator:
     assert metadata["core_design_sha256"] == "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
     assert len(metadata["build_git_commit"]) == 40
     assert metadata["minimum_point_spacing_mm"] == 10.0
+    assert metadata["sampling_configuration"]["duodenum_centerline_endpoint_hints_ras_mm"] == {
+        "proximal": [19.0, 24.0, 700.0],
+        "distal": [-33.0, 1.0, 664.0],
+    }
+    assert metadata["sampling_configuration"]["duodenum_centerline_endpoint_match_tolerance_mm"] == 1.0
+    assert metadata["duodenum_centerline_selection"]["mode"] == "manual_endpoint_hints"
+    assert metadata["duodenum_centerline_selection"]["matched_proximal_ras_mm"] == [19.0, 24.0, 700.0]
+    assert metadata["duodenum_centerline_selection"]["path_point_count"] == 166
+    assert metadata["duodenum_centerline_selection"]["automatic_terminal_spur_pruning_applied"] is False
     assert metadata["pose_angles_degrees"]["roll"] == [-5.0, 0.0, 5.0]
     assert metadata["square_sampling"] == {
         "side_length_mm": 10.0,
@@ -432,6 +492,7 @@ class HMMPoseEstimator:
         run_case(recolored_config)
 
     shifted_surfaces = {
+        **surfaces,
         "stomach": replace(
             surfaces["stomach"],
             points=surfaces["stomach"].points + np.asarray([0.0, 0.0, 1.0]),
@@ -500,14 +561,19 @@ class HMMPoseEstimator:
     assert gallery_record["resampling_backend"] == "cpu"
 
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
-    empty_index = run_case(replace(config, case_id="empty_case"), steps=["index"])
+    empty_config = replace(
+        config,
+        case_id="empty_case",
+        sampling=replace(config.sampling, duodenum_centerline_endpoint_hints_ras_mm=None),
+    )
+    empty_index = run_case(empty_config, steps=["index"])
 
     assert empty_index.indexed_feature_count == 0
 
     log_only_case = tmp_path / "output" / "log_only_case" / "logs"
     log_only_case.mkdir(parents=True)
     (log_only_case / "run.log").write_text("started\n", encoding="utf-8")
-    log_only = run_case(replace(config, case_id="log_only_case"), resume=False, steps=["sample"])
+    log_only = run_case(replace(empty_config, case_id="log_only_case"), resume=False, steps=["sample"])
 
     assert log_only.total_squares == 0
     assert (log_only_case.parent / "ResampledpointPLY" / "FPS-Stomach.ply").is_file()

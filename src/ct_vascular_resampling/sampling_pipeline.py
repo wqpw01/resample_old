@@ -217,6 +217,8 @@ def sample_organs(
         voxel_pitch_mm=settings.centerline_voxel_pitch_mm,
         tangent_window_mm=settings.centerline_tangent_window_mm,
         max_terminal_spur_mm=settings.centerline_max_terminal_spur_mm,
+        endpoint_hints_ras_mm=settings.duodenum_centerline_endpoint_hints_ras_mm,
+        endpoint_match_tolerance_mm=settings.duodenum_centerline_endpoint_match_tolerance_mm,
     )
     stomach_rays = filter_points_by_target_rays(
         meshes["stomach"].vertices,

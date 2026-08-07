@@ -233,14 +233,34 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypat
         "portal_vein_and_splenic_vein": export("portal_vein_and_splenic_vein", (5.0, 0.0, 0.0)),
         "spleen": export("spleen", (5.0, 0.0, 0.0)),
     }
-    settings = SamplingConfig(point_counts={"stomach": 1, "liver": 1, "pancreas": 1, "duodenum_part1": 1, "duodenum_part2": 1, "esophagus": 1})
+    settings = SamplingConfig(
+        point_counts={
+            "stomach": 1,
+            "liver": 1,
+            "pancreas": 1,
+            "duodenum_part1": 1,
+            "duodenum_part2": 1,
+            "esophagus": 1,
+        },
+        duodenum_centerline_endpoint_hints_ras_mm=(
+            (19.0, 24.0, 700.0),
+            (-33.0, 1.0, 664.0),
+        ),
+        duodenum_centerline_endpoint_match_tolerance_mm=1.0,
+    )
     centerline_points = np.column_stack([np.full(31, 10.0), np.zeros(31), np.arange(-15.0, 16.0)])
     centerline = CenterlinePath(
         centerline_points,
         np.asarray([[0.0, 0.0, 1.0]] * len(centerline_points)),
         np.arange(len(centerline_points), dtype=np.float64),
     )
-    monkeypatch.setattr("ct_vascular_resampling.sampling_pipeline.extract_duodenum_centerline", lambda *_args, **_kwargs: centerline)
+    captured = {}
+
+    def record_centerline(*_args, **kwargs):
+        captured.update(kwargs)
+        return centerline
+
+    monkeypatch.setattr("ct_vascular_resampling.sampling_pipeline.extract_duodenum_centerline", record_centerline)
 
     samples = sample_organs(paths, settings, seed=0, input_coordinate_system="RAS")
 
@@ -248,5 +268,7 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypat
     assert all(len(value.points) == len(value.normals) and len(value.points) > 0 for value in samples.values())
     assert samples["stomach"].sampling_statistics["stomach"].minimum_spacing_mm == 10.0
     assert set(samples["duodenum"].sampling_statistics) == {"duodenum_bulb", "duodenum_remainder"}
+    assert captured["endpoint_hints_ras_mm"] == settings.duodenum_centerline_endpoint_hints_ras_mm
+    assert captured["endpoint_match_tolerance_mm"] == 1.0
     for organ in ("stomach", "duodenum", "esophagus"):
         assert all(target_ids for target_ids in samples[organ].target_ids)
