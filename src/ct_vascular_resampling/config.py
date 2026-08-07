@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,10 @@ class SamplingConfig:
     centerline_voxel_pitch_mm: float = 1.0
     centerline_tangent_window_mm: float = 10.0
     centerline_max_terminal_spur_mm: float = 5.0
+    duodenum_centerline_endpoint_hints_ras_mm: (
+        tuple[tuple[float, float, float], tuple[float, float, float]] | None
+    ) = None
+    duodenum_centerline_endpoint_match_tolerance_mm: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -161,6 +166,17 @@ def _number(value: Any, field: str, default: float) -> float:
     return result
 
 
+def _finite_vector3(value: Any, field: str) -> tuple[float, float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{field} 必须是三个有限数值")
+    if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in value):
+        raise ValueError(f"{field} 必须是三个有限数值")
+    result = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in result):
+        raise ValueError(f"{field} 必须是三个有限数值")
+    return result
+
+
 def _integer(value: Any, field: str, default: int, minimum: int = 1) -> int:
     result = default if value is None else int(value)
     if result < minimum:
@@ -227,6 +243,8 @@ def _load_sampling(raw: Any) -> SamplingConfig:
         "centerline_voxel_pitch_mm",
         "centerline_tangent_window_mm",
         "centerline_max_terminal_spur_mm",
+        "duodenum_centerline_endpoint_hints_ras_mm",
+        "duodenum_centerline_endpoint_match_tolerance_mm",
     }
     unexpected = set(values) - supported
     if unexpected:
@@ -239,6 +257,46 @@ def _load_sampling(raw: Any) -> SamplingConfig:
         if name not in counts:
             raise ValueError(f"不支持的采样点数量配置: {name}")
         counts[name] = _integer(value, f"sampling.point_counts.{name}", counts[name])
+    hints_raw = values.get("duodenum_centerline_endpoint_hints_ras_mm")
+    tolerance_supplied = "duodenum_centerline_endpoint_match_tolerance_mm" in values
+    if hints_raw is None and tolerance_supplied:
+        raise ValueError(
+            "sampling.duodenum_centerline_endpoint_match_tolerance_mm 只能与 "
+            "sampling.duodenum_centerline_endpoint_hints_ras_mm 同时配置"
+        )
+    endpoint_hints = None
+    endpoint_tolerance = 1.0
+    if hints_raw is not None:
+        hints = _mapping(hints_raw, "sampling.duodenum_centerline_endpoint_hints_ras_mm")
+        unexpected_hints = set(hints) - {"proximal", "distal"}
+        missing_hints = {"proximal", "distal"} - set(hints)
+        if missing_hints:
+            raise ValueError(
+                "sampling.duodenum_centerline_endpoint_hints_ras_mm 缺少配置: "
+                + ", ".join(sorted(missing_hints))
+            )
+        if unexpected_hints:
+            raise ValueError(
+                "sampling.duodenum_centerline_endpoint_hints_ras_mm 包含不支持的配置: "
+                + ", ".join(sorted(unexpected_hints))
+            )
+        endpoint_hints = (
+            _finite_vector3(
+                hints["proximal"],
+                "sampling.duodenum_centerline_endpoint_hints_ras_mm.proximal",
+            ),
+            _finite_vector3(
+                hints["distal"],
+                "sampling.duodenum_centerline_endpoint_hints_ras_mm.distal",
+            ),
+        )
+        endpoint_tolerance = _number(
+            values.get("duodenum_centerline_endpoint_match_tolerance_mm"),
+            "sampling.duodenum_centerline_endpoint_match_tolerance_mm",
+            1.0,
+        )
+        if not math.isfinite(endpoint_tolerance):
+            raise ValueError("sampling.duodenum_centerline_endpoint_match_tolerance_mm 必须是有限数值")
     return SamplingConfig(
         point_counts=counts,
         ray_length_mm=_number(values.get("ray_length_mm"), "sampling.ray_length_mm", 100.0),
@@ -253,6 +311,8 @@ def _load_sampling(raw: Any) -> SamplingConfig:
         centerline_max_terminal_spur_mm=_number(
             values.get("centerline_max_terminal_spur_mm"), "sampling.centerline_max_terminal_spur_mm", 5.0
         ),
+        duodenum_centerline_endpoint_hints_ras_mm=endpoint_hints,
+        duodenum_centerline_endpoint_match_tolerance_mm=endpoint_tolerance,
     )
 
 

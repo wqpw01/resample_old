@@ -132,6 +132,65 @@ def test_case_config_rejects_obsolete_sampling_keys_instead_of_silently_using_de
         load_case_config(config_path)
 
 
+def test_case_config_loads_manual_duodenum_centerline_endpoints_in_ras(tmp_path):
+    organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        _case_yaml(organ_models)
+        + """
+sampling:
+  duodenum_centerline_endpoint_hints_ras_mm:
+    proximal: [19.0, 24.0, 700.0]
+    distal: [-33.0, 1.0, 664.0]
+  duodenum_centerline_endpoint_match_tolerance_mm: 1.0
+""",
+        encoding="utf-8",
+    )
+
+    config = load_case_config(config_path)
+
+    assert config.sampling.duodenum_centerline_endpoint_hints_ras_mm == (
+        (19.0, 24.0, 700.0),
+        (-33.0, 1.0, 664.0),
+    )
+    assert config.sampling.duodenum_centerline_endpoint_match_tolerance_mm == 1.0
+
+
+@pytest.mark.parametrize(
+    ("sampling_yaml", "message"),
+    [
+        ("duodenum_centerline_endpoint_hints_ras_mm:\n    proximal: [1, 2, 3]", "distal"),
+        (
+            "duodenum_centerline_endpoint_hints_ras_mm:\n    proximal: [1, 2]\n    distal: [3, 4, 5]",
+            "proximal",
+        ),
+        (
+            "duodenum_centerline_endpoint_hints_ras_mm:\n    proximal: [.nan, 2, 3]\n    distal: [3, 4, 5]",
+            "有限",
+        ),
+        (
+            "duodenum_centerline_endpoint_hints_ras_mm:\n    proximal: [1, 2, 3]\n    distal: [3, 4, 5]\n"
+            "duodenum_centerline_endpoint_match_tolerance_mm: 0",
+            "endpoint_match_tolerance_mm",
+        ),
+        ("duodenum_centerline_endpoint_match_tolerance_mm: 0.5", "endpoint_hints"),
+    ],
+)
+def test_case_config_rejects_invalid_manual_duodenum_centerline_configuration(
+    tmp_path, sampling_yaml, message
+):
+    organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
+    indented = "\n  ".join(sampling_yaml.splitlines())
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        _case_yaml(organ_models) + f"\nsampling:\n  {indented}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        load_case_config(config_path)
+
+
 def test_case_config_accepts_an_explicit_dicom_series_uid(tmp_path):
     organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
     config_path = tmp_path / "case.yaml"
