@@ -47,6 +47,7 @@ ct_vascular_resampling/
 - `quality.py`：按黑色区域占比和直线黑边筛选不合格图像。
 - `gallery.py`、`artifacts.py`：将样本写入 `gallery/`、`rejected/`、`unindexed/`，并生成 JSONL 清单和检索库摘要。
 - `registration_adapter.py`：读取 `gallery.jsonl`，恢复 `2021.py` 可直接使用的检索对象。
+- `scripts/recover_interrupted_run_metadata.py`：在 SIGHUP 等信号中断且 `run_metadata.json` 缺失时，严格校验已有清单并重建恢复协议；不改写 PNG、PLY 或 JSONL。
 - `config.py`、`cli.py`、`pipeline.py`：配置解析、参数覆盖、日志和全流程调度。
 - `geometry.py`、`mesh_io.py`、`logging_utils.py`：几何计算、网格读取和日志基础设施。
 
@@ -56,7 +57,23 @@ ct_vascular_resampling/
 
 每个 gallery 帧继续生成 `ct/`、白底仅血管 `boundary_only/` 和 CT 血管叠加 `ct_overlay/`，并新增白底 `organ_vessel_boundary/`：11 类非血管器官先按固定颜色绘制，血管再按原配置颜色覆盖绘制。对应 JSONL 记录新增 `organ_vessel_boundary_png` 和排序去重的 `organ_labels`；器官标签不写入血管 `features`，因此不改变图库状态或 `2021.py` 的血管检索语义。`unindexed`、`rejected` 和 `excluded_fov` 不生成该图，也不写这两个字段。
 
-断点恢复会检查四种状态的每条已完成记录、当前完整姿态 ID 集合、四顶点和位姿字段，并比较配置、输入 SHA-256、核心设计哈希和构建 Git commit 组成的运行协议。恢复仍会读取器官网格以重建姿态计划，并流式哈希输入；没有待处理姿态时不会把 CT 解码为体数据、不会加载血管渲染网格或初始化插值后端。旧图库或任何协议/几何不一致会明确报错，必须改用新的输出目录全量重建；拒绝前不会改写既有 PLY。
+断点恢复会检查四种状态的每条已完成记录、当前完整姿态 ID 集合、四顶点和位姿字段，并比较配置、输入 SHA-256、核心设计哈希和构建 Git commit 组成的运行协议。`run_metadata.json` 在首个待处理切面前原子写入 `run_state: running`，正常完成为 `complete`，普通异常为 `interrupted`。恢复仍会读取器官网格以重建姿态计划，并流式哈希输入；没有待处理姿态时不会把 CT 解码为体数据、不会加载血管渲染网格或初始化插值后端。旧图库或任何协议/几何不一致会明确报错，拒绝前不会改写既有 PLY。
+
+若进程因 `SIGHUP` 直接终止，且已有 JSONL 清单完整但缺少运行元数据，必须先执行受控重建：
+
+```bash
+python scripts/recover_interrupted_run_metadata.py \
+  --case-config configs/case.yaml \
+  --expected-completed-count 88280 \
+  --reason sighup \
+  --exit-code 129
+```
+
+该入口拒绝覆盖已有元数据，要求完成数、状态清单、姿态 ID、四顶点和位姿字段全部一致，并只原子写入带 `recovery_history` 的 `interrupted` 元数据。它不会修复或追加任何 JSONL；状态清单缺失、计数不符、陈旧姿态或几何不符都会失败。若恢复实现提交不同于已完成记录，元数据同时记录 `compatible_completed_build_git_commits`、`completed_build_git_commits` 和 `recovery_build_git_commit`；旧记录保留原提交，新记录写入真实恢复实现提交，不以环境变量伪装版本。恢复任务必须在独立 `setsid screen` 会话中运行。
+
+### Interrupted-run recovery
+
+The pipeline writes an atomic `run_metadata.json` checkpoint before the first pending slice. A normal run ends with `run_state: complete`; an ordinary exception leaves `interrupted`. After a `SIGHUP` exit such as code 129, run `scripts/recover_interrupted_run_metadata.py` only after verifying the expected manifest count. The recovery command validates the complete pose plan, geometry, input hashes and design protocol, writes no PNG/PLY/JSONL, and records both the old completed build commits and the recovery implementation commit. Resume the job inside a detached `screen` session so an SSH disconnect cannot terminate the worker.
 
 供 `2021.py` 检索时只加载 `gallery/gallery.jsonl`；`registration_adapter.load_gallery_database()` 会将其中的特征和方位转换为 `FeatureVector`、`VesselTriplet` 与 `ProbePose`，无需将 JSONL 转换为另一种文件格式。
 

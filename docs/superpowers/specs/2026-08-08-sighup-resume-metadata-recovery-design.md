@@ -66,13 +66,14 @@
 - `completed_pose_count` 和四类 `status_counts`；
 - `total_squares`；
 - `recovery_history`，记录原因 `sighup`、原退出码 129、恢复前清单计数和 UTC 时间；
+- `compatible_completed_build_git_commits`，只列出重建时已完成记录中实际存在且格式有效的提交；恢复历史同时记录恢复实现的真实 Git commit；
 - 完整 `resume_protocol_sha256` 和构成该摘要的协议字段。
 
 该入口不加载 CT 体数据、不初始化 CPU/GPU 插值后端、不生成或改写任何 PNG/PLY/JSONL。
 
 ### 3. 恢复运行
 
-恢复时仍由现有 `GalleryWriter` 读取并验证全部清单。`run_case` 比较重建元数据中的协议摘要与当前协议；不一致立即拒绝，不写新切面。
+恢复时仍由现有 `GalleryWriter` 读取并验证全部清单。`run_case` 比较重建元数据中的协议摘要与当前协议；不一致立即拒绝，不写新切面。既有姿态的构建提交只有在 `compatible_completed_build_git_commits` 中明确列出时才允许不同于当前恢复实现；旧记录不改写，新记录使用恢复实现的真实提交，最终元数据保留两者及恢复历史。
 
 后端初始化和 GPU/CPU 校准完成后，程序在首个待处理切面前更新 `running` 检查点，并保留 `recovery_history`。完成后最终元数据写 `complete`；普通异常结束时写 `interrupted`。
 

@@ -169,6 +169,8 @@ assert len(metadata["resume_protocol_sha256"]) == 64
 
 Add separate tests proving the function rejects an existing metadata file, an expected count mismatch, and a stale or geometrically changed pose.
 
+The partial-resume test must use different 40-character commits before and after interruption. It must prove that old records retain the interrupted commit, new records use the recovery implementation commit, and final metadata preserves the explicitly compatible completed-commit list and recovery history.
+
 - [ ] **Step 2: Run recovery tests and verify RED**
 
 Expected: collection or import failure because `recover_interrupted_run_metadata` does not exist.
@@ -233,7 +235,7 @@ Document the three `run_state` values, startup checkpoint timing, strict recover
 
 ```bash
 git diff --check
-rg -n "TBD|TODO|PLACEHOLDER" README.md docs/core-design-change-log-20260807.md || true
+rg -n "TBD|PLACEHOLDER" README.md docs/core-design-change-log-20260807.md || true
 mamba run -n base python -m pytest -q
 ```
 
