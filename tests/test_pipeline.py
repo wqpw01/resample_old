@@ -293,6 +293,8 @@ def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_pa
     assert record["resampling_backend"] == "cpu"
     assert (case_directory / "excluded_fov" / "ct" / "esophagus-000010-x-01.png").is_file()
     assert metadata["excluded_fov_count"] == 1
+    assert metadata["run_state"] == "complete"
+    assert metadata["completed_pose_count"] == 1
     assert not (case_directory / "rejected").exists()
 
 

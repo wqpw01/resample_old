@@ -421,6 +421,31 @@ def _write_run_metadata(case_directory: Path, metadata: dict) -> None:
     _write_json_atomic(case_directory / "run_metadata.json", metadata)
 
 
+def _metadata_with_state(
+    metadata: dict[str, object],
+    *,
+    state: str,
+    statuses: Counter[str],
+    total_squares: int,
+) -> dict[str, object]:
+    if state not in {"running", "interrupted", "complete"}:
+        raise ValueError(f"不支持的运行元数据状态: {state}")
+    result = {
+        **metadata,
+        "run_state": state,
+        "total_squares": total_squares,
+        "completed_pose_count": sum(statuses.values()),
+        "status_counts": dict(sorted(statuses.items())),
+        "excluded_fov_count": statuses["excluded_fov"],
+    }
+    recovery_history = metadata.get("recovery_history")
+    if recovery_history is not None:
+        if not isinstance(recovery_history, list):
+            raise ValueError("recovery_history 必须是列表")
+        result["recovery_history"] = recovery_history
+    return result
+
+
 def _preflight(config: CaseConfig) -> None:
     if not (config.ct_path.is_file() or config.ct_path.is_dir()):
         raise FileNotFoundError(f"CT 文件不存在: {config.ct_path}")
@@ -478,6 +503,7 @@ def run_case(
     statuses: Counter[str] = Counter()
     protocol_metadata = _run_protocol_metadata(config, centerline_selection)
     writer: GalleryWriter | None = None
+    previous_metadata: dict[str, object] | None = None
     calibration_samples: list[SquareSample] = []
     if "render" in selected:
         writer = GalleryWriter(
@@ -516,6 +542,15 @@ def run_case(
         if pending_count == 0:
             if sum(statuses.values()) != len(samples):
                 raise RuntimeError(f"姿态状态计数不完整: {sum(statuses.values())}/{len(samples)}")
+            _write_run_metadata(
+                case_directory,
+                _metadata_with_state(
+                    previous_metadata or protocol_metadata,
+                    state="complete",
+                    statuses=statuses,
+                    total_squares=len(samples),
+                ),
+            )
             selected.remove("render")
     if "sample" in selected:
         for organ in ORGAN_ORDER:
@@ -570,6 +605,8 @@ def run_case(
                 "calibration": None,
             }
         )
+        if previous_metadata is not None and "recovery_history" in previous_metadata:
+            backend_metadata["recovery_history"] = previous_metadata["recovery_history"]
         if backend.name != "cpu" and calibration_samples:
             reference_backend = CachedCpuBackend(volume)
             try:
@@ -597,6 +634,17 @@ def run_case(
                 backend_metadata["fallback_reason"] = message
             else:
                 reference_backend.close()
+        backend_metadata["selected_backend"] = backend.name
+        _write_run_metadata(
+            case_directory,
+            _metadata_with_state(
+                backend_metadata,
+                state="running",
+                statuses=statuses,
+                total_squares=len(samples),
+            ),
+        )
+
         def render_one(item: tuple[SquareSample, np.ndarray, str]) -> str:
             sample, hu, backend_name = item
             return render_precomputed_square(
@@ -669,7 +717,15 @@ def run_case(
             backend_metadata["excluded_fov_count"] = statuses["excluded_fov"]
             backend_metadata["completed_pose_count"] = sum(statuses.values())
             backend_metadata["status_counts"] = dict(sorted(statuses.items()))
-            _write_run_metadata(case_directory, backend_metadata)
+            _write_run_metadata(
+                case_directory,
+                _metadata_with_state(
+                    backend_metadata,
+                    state="complete" if sum(statuses.values()) == len(samples) else "interrupted",
+                    statuses=statuses,
+                    total_squares=len(samples),
+                ),
+            )
             backend.close()
         if sum(statuses.values()) != len(samples):
             raise RuntimeError(
