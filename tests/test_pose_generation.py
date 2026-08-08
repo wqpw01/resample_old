@@ -54,14 +54,14 @@ def test_pose_variants_use_confirmed_roll_pitch_and_region_yaw_ranges():
     bulb = generate_pose_variants(np.zeros(3), frame, 100.0, DUODENUM_BULB_YAW)
     special = generate_pose_variants(np.zeros(3), frame, 100.0, PANCREAS_SPECIAL_YAW)
 
-    assert len(standard) == 117
-    assert len(bulb) == 333
-    assert len(special) == 279
-    assert {value.roll_degrees for value in standard} == {-5.0, 0.0, 5.0}
-    assert {value.pitch_degrees for value in standard} == {-5.0, 0.0, 5.0}
+    assert {value.roll_degrees for value in standard} == {-15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0}
+    assert {value.pitch_degrees for value in standard} == {-10.0, -5.0, 0.0, 5.0, 10.0}
     assert {value.yaw_degrees for value in standard} == set(np.arange(-30.0, 31.0, 5.0))
-    assert min(value.yaw_degrees for value in special) == -120.0
-    assert max(value.yaw_degrees for value in special) == 30.0
+    assert {value.yaw_degrees for value in bulb} == set(np.arange(-90.0, 91.0, 5.0))
+    assert {value.yaw_degrees for value in special} == set(np.arange(-120.0, 31.0, 5.0))
+    assert len(standard) == 455
+    assert len(bulb) == 1295
+    assert len(special) == 1085
 
 
 def test_zero_pose_keeps_probe_at_bottom_center_and_uses_100_mm_forward_depth():

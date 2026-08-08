@@ -4,11 +4,13 @@ import numpy as np
 import pytest
 import trimesh
 
+import ct_vascular_resampling.sampling_pipeline as sampling_pipeline_module
 from ct_vascular_resampling.centerline import CenterlinePath
 from ct_vascular_resampling.config import SamplingConfig, SquareConfig
 from ct_vascular_resampling.sampling_pipeline import (
     SquareSample,
     SurfaceSamples,
+    _candidate_pose_count,
     _deduplicate_exact_poses,
     _merge_unique,
     _sample,
@@ -41,8 +43,8 @@ def test_square_sample_expansion_uses_confirmed_axis_count_and_variant_count():
 
     stomach = [sample for sample in samples if sample.organ == "stomach"]
     esophagus = [sample for sample in samples if sample.organ == "esophagus"]
-    assert len(stomach) == 117
-    assert len(esophagus) == 117
+    assert len(stomach) == 455
+    assert len(esophagus) == 455
     assert stomach[0].sample_id.startswith("stomach-000000-")
     assert np.isclose(np.linalg.norm(stomach[0].vertices[1] - stomach[0].vertices[0]), 100.0)
 
@@ -62,7 +64,7 @@ def test_square_sample_expansion_returns_a_reiterable_pose_stream_instead_of_a_l
     samples = generate_square_samples(surfaces, SquareConfig())
 
     assert not isinstance(samples, list)
-    assert len(samples) == 117
+    assert len(samples) == 455
     first_ids = [sample.sample_id for sample in samples]
     second_ids = [sample.sample_id for sample in samples]
     assert first_ids == second_ids
@@ -83,7 +85,7 @@ def test_square_sample_expansion_uses_pancreas_special_yaw_policy():
     samples = generate_square_samples(surfaces, SquareConfig())
 
     stomach = [sample for sample in samples if sample.organ == "stomach"]
-    assert len(stomach) == 279
+    assert len(stomach) == 1085
     assert {sample.yaw_policy for sample in stomach} == {"pancreas_special"}
     assert min(sample.yaw_degrees for sample in stomach) == -120.0
     assert max(sample.yaw_degrees for sample in stomach) == 30.0
@@ -108,7 +110,7 @@ def test_duodenum_pancreas_ray_hit_does_not_use_the_stomach_pancreas_special_yaw
 
     samples = generate_square_samples(surfaces, SquareConfig())
 
-    assert len(samples) == 117
+    assert len(samples) == 455
     assert {sample.yaw_policy for sample in samples} == {"standard"}
 
 
@@ -134,11 +136,27 @@ def test_exact_duplicate_pose_keeps_base_region_and_records_supplement_source():
 
     samples = generate_square_samples(surfaces, SquareConfig())
 
-    assert len(samples) == 117
+    assert len(samples) == 455
     assert {sample.organ for sample in samples} == {"stomach"}
     assert {sample.duplicate_source_regions for sample in samples} == {("liver_supplement",)}
-    assert len({sample.sample_id for sample in samples}) == 117
+    assert len({sample.sample_id for sample in samples}) == 455
     assert all("-r" in sample.sample_id and "-p" in sample.sample_id and "-y" in sample.sample_id for sample in samples)
+
+
+def test_candidate_pose_count_is_derived_from_roll_pitch_and_yaw_arrays(monkeypatch):
+    surfaces = {
+        "stomach": SurfaceSamples(
+            np.asarray([[0.0, 0.0, 0.0]]),
+            np.asarray([[1.0, 0.0, 0.0]]),
+            region_ids=("stomach",),
+            target_ids=(("liver",),),
+            zero_plane_anchor_world=np.asarray([0.0, -1.0, 0.0]),
+            pancreas_special_x_limit=10.0,
+        )
+    }
+    monkeypatch.setattr(sampling_pipeline_module, "ROLL_ANGLES_DEGREES", (-10.0, 0.0, 10.0))
+    monkeypatch.setattr(sampling_pipeline_module, "PITCH_ANGLES_DEGREES", (-5.0, 5.0))
+    assert _candidate_pose_count(surfaces) == 3 * 2 * 13
 
 
 def test_pose_deduplication_does_not_merge_through_a_tolerance_chain():

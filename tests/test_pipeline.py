@@ -406,18 +406,18 @@ class HMMPoseEstimator:
     monkeypatch.setattr(CachedCpuBackend, "sample_many", record_cpu_batch)
 
     dry = run_case(config, dry_run=True)
-    assert dry.total_squares == 117
+    assert dry.total_squares == 455
     assert not (tmp_path / "output").exists()
 
     completed = run_case(config)
 
-    assert completed.total_squares == 117
+    assert completed.total_squares == 455
     assert (tmp_path / "output" / "case_001" / "ResampledpointPLY" / "FPS-Stomach.ply").is_file()
     assert (tmp_path / "output" / "case_001" / "squarePLY" / "Stomach-vertex.ply").is_file()
     assert (tmp_path / "output" / "case_001" / "gallery" / "gallery.jsonl").is_file()
     metadata = json.loads((tmp_path / "output" / "case_001" / "run_metadata.json").read_text(encoding="utf-8"))
     assert metadata["selected_backend"] == "cpu"
-    assert metadata["total_squares"] == 117
+    assert metadata["total_squares"] == 455
     assert metadata["coordinate_system"] == "RAS"
     assert metadata["core_design_sha256"] == "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
     assert len(metadata["build_git_commit"]) == 40
@@ -431,7 +431,8 @@ class HMMPoseEstimator:
     assert metadata["duodenum_centerline_selection"]["matched_proximal_ras_mm"] == [19.0, 24.0, 700.0]
     assert metadata["duodenum_centerline_selection"]["path_point_count"] == 166
     assert metadata["duodenum_centerline_selection"]["automatic_terminal_spur_pruning_applied"] is False
-    assert metadata["pose_angles_degrees"]["roll"] == [-5.0, 0.0, 5.0]
+    assert metadata["pose_angles_degrees"]["roll"] == [-15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0]
+    assert metadata["pose_angles_degrees"]["pitch"] == [-10.0, -5.0, 0.0, 5.0, 10.0]
     assert metadata["square_sampling"] == {
         "side_length_mm": 10.0,
         "output_resolution": [20, 20],
@@ -454,9 +455,9 @@ class HMMPoseEstimator:
         "saved_artifacts": ["ct_png"],
         "out_of_bounds_png_value": 0,
     }
-    assert metadata["completed_pose_count"] == 117
+    assert metadata["completed_pose_count"] == 455
     assert metadata["status_counts"] == completed.status_counts
-    assert cpu_batch_sizes == [8] * 14 + [5]
+    assert cpu_batch_sizes == [8] * 56 + [7]
     library_summary = json.loads((tmp_path / "output" / "case_001" / "library_summary.json").read_text(encoding="utf-8"))
     assert library_summary["case_id"] == "case_001"
     assert library_summary["indexed_feature_count"] == completed.indexed_feature_count
@@ -471,8 +472,8 @@ class HMMPoseEstimator:
     )
     resumed = run_case(config)
     assert cpu_batch_sizes == calls_after_first_run
-    assert sum(resumed.status_counts.values()) == 117
-    assert len((tmp_path / "output" / "case_001" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()) == 117
+    assert sum(resumed.status_counts.values()) == 455
+    assert len((tmp_path / "output" / "case_001" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()) == 455
 
     rectangles_before_incompatible_resume = (
         tmp_path / "output" / "case_001" / "rectangles.ply"

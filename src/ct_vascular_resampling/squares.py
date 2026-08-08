@@ -12,8 +12,8 @@ from .centerline import CenterlinePath
 STANDARD_YAW = "standard"
 DUODENUM_BULB_YAW = "duodenum_bulb"
 PANCREAS_SPECIAL_YAW = "pancreas_special"
-ROLL_ANGLES_DEGREES = (-5.0, 0.0, 5.0)
-PITCH_ANGLES_DEGREES = (-5.0, 0.0, 5.0)
+ROLL_ANGLES_DEGREES = tuple(float(value) for value in range(-15, 16, 5))
+PITCH_ANGLES_DEGREES = tuple(float(value) for value in range(-10, 11, 5))
 YAW_ANGLES_DEGREES = {
     STANDARD_YAW: tuple(float(value) for value in range(-30, 31, 5)),
     DUODENUM_BULB_YAW: tuple(float(value) for value in range(-90, 91, 5)),

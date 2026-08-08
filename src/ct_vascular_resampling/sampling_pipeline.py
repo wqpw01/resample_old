@@ -29,6 +29,8 @@ from .sampling import (
 from .squares import (
     DUODENUM_BULB_YAW,
     PANCREAS_SPECIAL_YAW,
+    PITCH_ANGLES_DEGREES,
+    ROLL_ANGLES_DEGREES,
     STANDARD_YAW,
     YAW_ANGLES_DEGREES,
     duodenum_local_frame,
@@ -548,6 +550,7 @@ def _iter_pose_candidates(
 
 def _candidate_pose_count(surfaces: Mapping[str, SurfaceSamples]) -> int:
     count = 0
+    axis_pose_count = len(ROLL_ANGLES_DEGREES) * len(PITCH_ANGLES_DEGREES)
     for organ in ("stomach", "duodenum", "esophagus", "liver", "pancreas"):
         surface = surfaces.get(organ, _empty_samples())
         if not len(surface.points):
@@ -566,7 +569,7 @@ def _candidate_pose_count(surfaces: Mapping[str, SurfaceSamples]) -> int:
                 target_ids,
                 surface.pancreas_special_x_limit,
             )
-            count += len(YAW_ANGLES_DEGREES[yaw_policy]) * 9
+            count += len(YAW_ANGLES_DEGREES[yaw_policy]) * axis_pose_count
     return count
 
 
