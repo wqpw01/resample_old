@@ -66,10 +66,12 @@ class GalleryWriter:
         case_id: str,
         *,
         required_core_design_sha256: str | None = None,
+        repair_missing_state_records: bool = True,
     ):
         self.case_directory = Path(case_directory)
         self.case_id = case_id
         self.required_core_design_sha256 = required_core_design_sha256
+        self.repair_missing_state_records = repair_missing_state_records
         self.manifest_path = self.case_directory / "manifest.jsonl"
         self.case_directory.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
@@ -198,6 +200,10 @@ class GalleryWriter:
                     digest = _record_digest(record)
                     state_entry = state_entries.get(sample_id)
                     if state_entry is None:
+                        if not self.repair_missing_state_records:
+                            raise ValueError(
+                                f"状态清单缺少根 manifest 记录: {status}/{sample_id}"
+                            )
                         self._append_jsonl(state_manifest_paths[status], record)
                         state_entries[sample_id] = (status, digest)
                     elif state_entry[0] != status:

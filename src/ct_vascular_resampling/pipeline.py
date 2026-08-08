@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import cache
 import hashlib
 from itertools import islice
@@ -35,7 +36,7 @@ from .mesh_io import load_surface_mesh
 from .quality import evaluate_ct_quality
 from .resampling_backend import CachedCpuBackend, create_sampling_backend, validate_backend_against_cpu
 from .rendering import OrganLayer, VesselLayer, render_sample_images
-from .sampling_pipeline import ORGAN_ORDER, SquareSample, SurfaceSamples, generate_square_samples, sample_organs
+from .sampling_pipeline import ORGAN_ORDER, PoseStream, SquareSample, SurfaceSamples, generate_square_samples, sample_organs
 from .squares import PITCH_ANGLES_DEGREES, ROLL_ANGLES_DEGREES, YAW_ANGLES_DEGREES
 
 
@@ -208,7 +209,12 @@ def _run_protocol_metadata(
     return protocol
 
 
-def _validate_completed_pose(sample: SquareSample, record: dict | None) -> None:
+def _validate_completed_pose(
+    sample: SquareSample,
+    record: dict | None,
+    *,
+    compatible_build_git_commits: set[str] | None = None,
+) -> None:
     if record is None:
         raise ValueError(f"姿态 {sample.sample_id} 有完成状态但缺少根清单记录")
     frame = frame_from_vertices(sample.vertices)
@@ -223,7 +229,16 @@ def _validate_completed_pose(sample: SquareSample, record: dict | None) -> None:
         "length_mm": float(frame.length_mm),
         **_pose_metadata(sample),
     }
-    mismatches = [field for field, value in expected.items() if record.get(field) != value]
+    mismatches = [
+        field
+        for field, value in expected.items()
+        if field != "build_git_commit" and record.get(field) != value
+    ]
+    expected_commit = str(expected["build_git_commit"])
+    actual_commit = record.get("build_git_commit")
+    allowed_commits = {expected_commit} | (compatible_build_git_commits or set())
+    if actual_commit not in allowed_commits:
+        mismatches.append("build_git_commit")
     if mismatches:
         raise ValueError(
             f"姿态 {sample.sample_id} 的既有几何或位姿元数据不一致: {', '.join(mismatches)}；请使用新的输出目录"
@@ -461,6 +476,133 @@ def _legacy_name(organ: str) -> str:
     return organ[:1].upper() + organ[1:]
 
 
+@dataclass(frozen=True)
+class _PosePlan:
+    surfaces: dict[str, SurfaceSamples]
+    samples: PoseStream
+    sampled_counts: dict[str, int]
+    centerline_selection: dict[str, object] | None
+    protocol_metadata: dict[str, object]
+
+
+def _prepare_pose_plan(config: CaseConfig) -> _PosePlan:
+    _preflight(config)
+    surfaces = sample_organs(
+        config.organ_models,
+        config.sampling,
+        config.runtime.seed,
+        input_coordinate_system=config.geometry.input_coordinate_system,
+    )
+    duodenum_centerline = surfaces.get("duodenum", SurfaceSamples([], [])).centerline
+    selection_audit = duodenum_centerline.selection_audit if duodenum_centerline is not None else None
+    if config.sampling.duodenum_centerline_endpoint_hints_ras_mm is not None and selection_audit is None:
+        raise ValueError("病例配置了十二指肠人工端点，但采样结果缺少人工中心线选择审计")
+    centerline_selection = selection_audit.to_record() if selection_audit is not None else None
+    samples = generate_square_samples(surfaces, config.square)
+    sampled_counts = {organ: len(surfaces.get(organ, SurfaceSamples([], [])).points) for organ in ORGAN_ORDER}
+    protocol_metadata = _run_protocol_metadata(config, centerline_selection)
+    return _PosePlan(surfaces, samples, sampled_counts, centerline_selection, protocol_metadata)
+
+
+def recover_interrupted_run_metadata(
+    config: CaseConfig,
+    *,
+    expected_completed_count: int,
+    reason: str,
+    exit_code: int,
+    recovered_at_utc: str | None = None,
+) -> dict[str, object]:
+    """严格校验已有姿态后，为信号中断的运行重建缺失元数据。"""
+
+    if isinstance(expected_completed_count, bool) or not isinstance(expected_completed_count, int):
+        raise ValueError("expected_completed_count 必须是整数")
+    if expected_completed_count < 0:
+        raise ValueError("expected_completed_count 不能为负数")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason 必须是非空字符串")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise ValueError("exit_code 必须是整数")
+    metadata_path = config.output_root / config.case_id / "run_metadata.json"
+    if metadata_path.exists():
+        raise FileExistsError(f"运行元数据已存在，拒绝覆盖: {metadata_path}")
+    if recovered_at_utc is None:
+        recovered_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    else:
+        try:
+            parsed_timestamp = datetime.fromisoformat(recovered_at_utc.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("recovered_at_utc 必须是 ISO-8601 时间") from error
+        if parsed_timestamp.tzinfo is None:
+            raise ValueError("recovered_at_utc 必须包含时区")
+
+    plan = _prepare_pose_plan(config)
+    writer = GalleryWriter(
+        config.output_root / config.case_id,
+        config.case_id,
+        required_core_design_sha256=CORE_DESIGN_SHA256,
+        repair_missing_state_records=False,
+    )
+    statuses = Counter(writer.completed_statuses.values())
+    if sum(statuses.values()) != expected_completed_count:
+        raise ValueError(
+            f"已完成姿态数 {sum(statuses.values())} 与预期 {expected_completed_count} 不一致"
+        )
+    completed_build_commits = {
+        str(record.get("build_git_commit"))
+        for record in writer.completed_records.values()
+        if isinstance(record.get("build_git_commit"), str)
+    }
+    expected_pose_ids: set[str] = set()
+    for sample in plan.samples:
+        if sample.sample_id in expected_pose_ids:
+            raise ValueError(f"当前姿态流包含重复 ID: {sample.sample_id}")
+        expected_pose_ids.add(sample.sample_id)
+        completed = writer.completed_status(sample.sample_id)
+        if completed is not None:
+            _validate_completed_pose(
+                sample,
+                writer.completed_record(sample.sample_id),
+                compatible_build_git_commits=completed_build_commits,
+            )
+    stale_pose_ids = set(writer.completed_statuses) - expected_pose_ids
+    if stale_pose_ids:
+        preview = ", ".join(sorted(stale_pose_ids)[:10])
+        raise ValueError(f"既有清单包含当前姿态集合之外的陈旧 ID: {preview}")
+    recovery_record = {
+        "reason": reason.strip(),
+        "exit_code": exit_code,
+        "recovered_at_utc": recovered_at_utc,
+        "completed_pose_count": expected_completed_count,
+        "status_counts": dict(sorted(statuses.items())),
+        "completed_build_git_commits": sorted(completed_build_commits),
+        "recovery_build_git_commit": plan.protocol_metadata["build_git_commit"],
+    }
+    completed_backends = {
+        str(record.get("resampling_backend"))
+        for record in writer.completed_records.values()
+        if isinstance(record.get("resampling_backend"), str)
+    }
+    metadata = {
+        **plan.protocol_metadata,
+        "case_id": config.case_id,
+        "requested_backend": config.runtime.backend,
+        "selected_backend": completed_backends.pop() if len(completed_backends) == 1 else "pending_resume",
+        "gpu_device": config.runtime.gpu_device,
+        "gpu_batch_size": config.runtime.gpu_batch_size,
+        "calibration": None,
+        "compatible_completed_build_git_commits": sorted(completed_build_commits),
+        "recovery_history": [recovery_record],
+    }
+    metadata = _metadata_with_state(
+        metadata,
+        state="interrupted",
+        statuses=statuses,
+        total_squares=len(plan.samples),
+    )
+    _write_run_metadata(config.output_root / config.case_id, metadata)
+    return metadata
+
+
 def run_case(
     config: CaseConfig,
     dry_run: bool = False,
@@ -479,20 +621,11 @@ def run_case(
         selected = {"sample", "square", "render", "index"}
     if "filter" in selected:
         selected.add("render")
-    _preflight(config)
-    surfaces = sample_organs(
-        config.organ_models,
-        config.sampling,
-        config.runtime.seed,
-        input_coordinate_system=config.geometry.input_coordinate_system,
-    )
-    duodenum_centerline = surfaces.get("duodenum", SurfaceSamples([], [])).centerline
-    selection_audit = duodenum_centerline.selection_audit if duodenum_centerline is not None else None
-    if config.sampling.duodenum_centerline_endpoint_hints_ras_mm is not None and selection_audit is None:
-        raise ValueError("病例配置了十二指肠人工端点，但采样结果缺少人工中心线选择审计")
-    centerline_selection = selection_audit.to_record() if selection_audit is not None else None
-    samples = generate_square_samples(surfaces, config.square)
-    sampled_counts = {organ: len(surfaces.get(organ, SurfaceSamples([], [])).points) for organ in ORGAN_ORDER}
+    plan = _prepare_pose_plan(config)
+    surfaces = plan.surfaces
+    samples = plan.samples
+    sampled_counts = plan.sampled_counts
+    protocol_metadata = plan.protocol_metadata
     if dry_run:
         return RunSummary(config.case_id, sampled_counts, len(samples), {}, True)
 
@@ -501,9 +634,9 @@ def run_case(
     if has_run_artifacts and not resume and selected & {"sample", "square", "render"}:
         raise FileExistsError(f"输出目录已有内容，请启用恢复模式: {case_directory}")
     statuses: Counter[str] = Counter()
-    protocol_metadata = _run_protocol_metadata(config, centerline_selection)
     writer: GalleryWriter | None = None
     previous_metadata: dict[str, object] | None = None
+    compatible_build_git_commits: set[str] = set()
     calibration_samples: list[SquareSample] = []
     if "render" in selected:
         writer = GalleryWriter(
@@ -521,6 +654,12 @@ def run_case(
                 raise ValueError(f"无法读取既有运行元数据: {error}") from error
             if previous_metadata.get("resume_protocol_sha256") != protocol_metadata["resume_protocol_sha256"]:
                 raise ValueError("当前配置、设计或构建与既有结果的运行协议不一致；请使用新的输出目录")
+            raw_compatible_commits = previous_metadata.get("compatible_completed_build_git_commits", [])
+            if not isinstance(raw_compatible_commits, list) or any(
+                not isinstance(commit, str) or len(commit) != 40 for commit in raw_compatible_commits
+            ):
+                raise ValueError("既有恢复元数据的兼容构建提交列表无效")
+            compatible_build_git_commits = set(raw_compatible_commits)
         pending_count = 0
         expected_pose_ids: set[str] = set()
         for sample in samples:
@@ -533,7 +672,11 @@ def run_case(
                 if len(calibration_samples) < 64:
                     calibration_samples.append(sample)
             else:
-                _validate_completed_pose(sample, writer.completed_record(sample.sample_id))
+                _validate_completed_pose(
+                    sample,
+                    writer.completed_record(sample.sample_id),
+                    compatible_build_git_commits=compatible_build_git_commits,
+                )
                 statuses[completed] += 1
         stale_pose_ids = set(writer.completed_statuses) - expected_pose_ids
         if stale_pose_ids:
@@ -607,6 +750,10 @@ def run_case(
         )
         if previous_metadata is not None and "recovery_history" in previous_metadata:
             backend_metadata["recovery_history"] = previous_metadata["recovery_history"]
+        if previous_metadata is not None and "compatible_completed_build_git_commits" in previous_metadata:
+            backend_metadata["compatible_completed_build_git_commits"] = previous_metadata[
+                "compatible_completed_build_git_commits"
+            ]
         if backend.name != "cpu" and calibration_samples:
             reference_backend = CachedCpuBackend(volume)
             try:

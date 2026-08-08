@@ -340,6 +340,178 @@ def test_run_case_marks_metadata_interrupted_after_render_error(monkeypatch, tmp
     assert metadata["status_counts"] == {}
 
 
+def test_recover_interrupted_run_metadata_rebuilds_audited_protocol(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+    run_case(config, steps=["render"], workers=1)
+    case_directory = config.output_root / config.case_id
+    metadata_path = case_directory / "run_metadata.json"
+    interrupted_commit = json.loads(metadata_path.read_text(encoding="utf-8"))["build_git_commit"]
+    metadata_path.unlink()
+    manifest_before = (case_directory / "manifest.jsonl").read_bytes()
+    ct_path = case_directory / "excluded_fov" / "ct" / f"{outside_sample.sample_id}.png"
+    ct_before = ct_path.read_bytes()
+
+    metadata = pipeline_module.recover_interrupted_run_metadata(
+        config,
+        expected_completed_count=1,
+        reason="sighup",
+        exit_code=129,
+        recovered_at_utc="2026-08-08T10:43:29Z",
+    )
+
+    assert metadata["run_state"] == "interrupted"
+    assert metadata["completed_pose_count"] == 1
+    assert metadata["status_counts"] == {"excluded_fov": 1}
+    assert metadata["recovery_history"] == [
+        {
+            "reason": "sighup",
+            "exit_code": 129,
+            "recovered_at_utc": "2026-08-08T10:43:29Z",
+                "completed_pose_count": 1,
+                "status_counts": {"excluded_fov": 1},
+                "completed_build_git_commits": [interrupted_commit],
+                "recovery_build_git_commit": interrupted_commit,
+            }
+        ]
+    assert len(metadata["resume_protocol_sha256"]) == 64
+    assert json.loads(metadata_path.read_text(encoding="utf-8")) == metadata
+    assert (case_directory / "manifest.jsonl").read_bytes() == manifest_before
+    assert ct_path.read_bytes() == ct_before
+
+
+def test_recover_interrupted_run_metadata_refuses_existing_metadata(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+    run_case(config, steps=["render"], workers=1)
+
+    with pytest.raises(FileExistsError, match="run_metadata.json|元数据"):
+        pipeline_module.recover_interrupted_run_metadata(
+            config,
+            expected_completed_count=1,
+            reason="sighup",
+            exit_code=129,
+        )
+
+
+def test_recover_interrupted_run_metadata_refuses_count_mismatch(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+    run_case(config, steps=["render"], workers=1)
+    metadata_path = config.output_root / config.case_id / "run_metadata.json"
+    metadata_path.unlink()
+
+    with pytest.raises(ValueError, match="完成姿态数|预期|1|2"):
+        pipeline_module.recover_interrupted_run_metadata(
+            config,
+            expected_completed_count=2,
+            reason="sighup",
+            exit_code=129,
+        )
+    assert not metadata_path.exists()
+
+
+def test_recover_interrupted_run_metadata_refuses_changed_pose(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+    run_case(config, steps=["render"], workers=1)
+    metadata_path = config.output_root / config.case_id / "run_metadata.json"
+    metadata_path.unlink()
+    changed_sample = replace(outside_sample, vertices=outside_sample.vertices + np.asarray([0.0, 0.0, 0.5]))
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [changed_sample])
+
+    with pytest.raises(ValueError, match="姿态|几何|不一致"):
+        pipeline_module.recover_interrupted_run_metadata(
+            config,
+            expected_completed_count=1,
+            reason="sighup",
+            exit_code=129,
+        )
+    assert not metadata_path.exists()
+
+
+def test_recover_interrupted_run_metadata_does_not_repair_jsonl(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+    run_case(config, steps=["render"], workers=1)
+    case_directory = config.output_root / config.case_id
+    metadata_path = case_directory / "run_metadata.json"
+    metadata_path.unlink()
+    root_manifest = case_directory / "manifest.jsonl"
+    root_before = root_manifest.read_bytes()
+    state_manifest = case_directory / "excluded_fov.jsonl"
+    state_manifest.unlink()
+
+    with pytest.raises(ValueError, match="状态清单"):
+        pipeline_module.recover_interrupted_run_metadata(
+            config,
+            expected_completed_count=1,
+            reason="sighup",
+            exit_code=129,
+        )
+    assert root_manifest.read_bytes() == root_before
+    assert not state_manifest.exists()
+    assert not metadata_path.exists()
+
+
+def test_recovered_metadata_resumes_only_pending_samples(monkeypatch, tmp_path):
+    config, first_sample = _single_fov_case(tmp_path)
+    second_sample = replace(first_sample, sample_id="esophagus-000011-x-01")
+    samples = [first_sample, second_sample]
+    interrupted_commit = "1" * 40
+    recovery_commit = "2" * 40
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: samples)
+    monkeypatch.setattr(pipeline_module, "_build_git_commit", lambda: interrupted_commit)
+    original_render = pipeline_module.render_precomputed_square
+
+    def interrupt_second(sample, *args, **kwargs):
+        if sample.sample_id == second_sample.sample_id:
+            raise RuntimeError("simulated interruption")
+        return original_render(sample, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "render_precomputed_square", interrupt_second)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run_case(config, steps=["render"], workers=1)
+
+    case_directory = config.output_root / config.case_id
+    metadata_path = case_directory / "run_metadata.json"
+    assert len((case_directory / "manifest.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+    metadata_path.unlink()
+    monkeypatch.setattr(pipeline_module, "_build_git_commit", lambda: recovery_commit)
+    recovered_metadata = pipeline_module.recover_interrupted_run_metadata(
+        config,
+        expected_completed_count=1,
+        reason="sighup",
+        exit_code=129,
+        recovered_at_utc="2026-08-08T10:43:29Z",
+    )
+    assert recovered_metadata["compatible_completed_build_git_commits"] == [interrupted_commit]
+    assert recovered_metadata["recovery_history"][0]["completed_build_git_commits"] == [interrupted_commit]
+    assert recovered_metadata["recovery_history"][0]["recovery_build_git_commit"] == recovery_commit
+    monkeypatch.setattr(pipeline_module, "render_precomputed_square", original_render)
+
+    summary = run_case(config, steps=["render"], workers=1)
+
+    manifest_records = [
+        json.loads(line)
+        for line in (case_directory / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    final_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert summary.status_counts == {"excluded_fov": 2}
+    assert [record["slice_id"] for record in manifest_records] == [first_sample.sample_id, second_sample.sample_id]
+    assert [record["build_git_commit"] for record in manifest_records] == [interrupted_commit, recovery_commit]
+    assert final_metadata["run_state"] == "complete"
+    assert final_metadata["completed_pose_count"] == 2
+    assert final_metadata["compatible_completed_build_git_commits"] == [interrupted_commit]
+    assert final_metadata["recovery_history"][0]["exit_code"] == 129
+
+
 def test_run_case_writes_legacy_intermediates_and_gallery(monkeypatch, tmp_path):
     ct_path = tmp_path / "ct.nrrd"
     sitk.WriteImage(sitk.GetImageFromArray(np.full((32, 32, 32), 40.0, dtype=np.float32)), str(ct_path))
