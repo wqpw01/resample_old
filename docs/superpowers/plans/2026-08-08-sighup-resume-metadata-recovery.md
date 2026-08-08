@@ -41,7 +41,7 @@ assert summary.total_squares == 1
 Run:
 
 ```bash
-mamba run -n ct-vessel-resampling python -m pytest tests/test_pipeline.py::test_run_case_writes_metadata_before_first_render -q
+mamba run -n base python -m pytest tests/test_pipeline.py::test_run_case_writes_metadata_before_first_render -q
 ```
 
 Expected: FAIL because `run_metadata.json` does not exist when the first renderer is called.
@@ -112,7 +112,7 @@ In the rendering `finally`, write `complete` only when the status total equals `
 Run:
 
 ```bash
-mamba run -n ct-vessel-resampling python -m pytest \
+mamba run -n base python -m pytest \
   tests/test_pipeline.py::test_run_case_writes_metadata_before_first_render \
   tests/test_pipeline.py::test_run_case_marks_metadata_interrupted_after_render_error -q
 ```
@@ -122,7 +122,7 @@ Expected: 2 passed.
 - [ ] **Step 5: Run all pipeline tests**
 
 ```bash
-mamba run -n ct-vessel-resampling python -m pytest tests/test_pipeline.py -q
+mamba run -n base python -m pytest tests/test_pipeline.py -q
 ```
 
 Expected: all pipeline tests pass.
@@ -234,7 +234,7 @@ Document the three `run_state` values, startup checkpoint timing, strict recover
 ```bash
 git diff --check
 rg -n "TBD|TODO|PLACEHOLDER" README.md docs/core-design-change-log-20260807.md || true
-mamba run -n ct-vessel-resampling python -m pytest -q
+mamba run -n base python -m pytest -q
 ```
 
 Expected: no diff errors or placeholders; the full suite passes.

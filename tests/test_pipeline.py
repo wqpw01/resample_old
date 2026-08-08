@@ -210,7 +210,7 @@ def test_out_of_fov_square_writes_black_filled_ct_only(monkeypatch, tmp_path):
     assert not (tmp_path / "case" / "rejected").exists()
 
 
-def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_path):
+def _single_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
     ct_path = tmp_path / "ct.nrrd"
     sitk.WriteImage(sitk.GetImageFromArray(np.full((16, 16, 16), 40.0, dtype=np.float32)), str(ct_path))
     mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
@@ -266,6 +266,11 @@ def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_pa
         local_y_world=np.asarray([1.0, 0.0, 0.0]),
         local_z_world=np.asarray([0.0, 1.0, 0.0]),
     )
+    return config, outside_sample
+
+
+def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
     monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
     sample_many_calls: list[int] = []
@@ -289,6 +294,48 @@ def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_pa
     assert (case_directory / "excluded_fov" / "ct" / "esophagus-000010-x-01.png").is_file()
     assert metadata["excluded_fov_count"] == 1
     assert not (case_directory / "rejected").exists()
+
+
+def test_run_case_writes_metadata_before_first_render(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+    metadata_seen_before_render: dict[str, object] = {}
+    original_render = pipeline_module.render_precomputed_square
+
+    def observe_checkpoint(*args, **kwargs):
+        metadata_path = config.output_root / config.case_id / "run_metadata.json"
+        metadata_seen_before_render.update(json.loads(metadata_path.read_text(encoding="utf-8")))
+        return original_render(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "render_precomputed_square", observe_checkpoint)
+
+    summary = run_case(config, steps=["render"], workers=1)
+
+    assert metadata_seen_before_render["run_state"] == "running"
+    assert metadata_seen_before_render["completed_pose_count"] == 0
+    assert metadata_seen_before_render["status_counts"] == {}
+    assert summary.total_squares == 1
+
+
+def test_run_case_marks_metadata_interrupted_after_render_error(monkeypatch, tmp_path):
+    config, outside_sample = _single_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [outside_sample])
+
+    def fail_render(*_args, **_kwargs):
+        raise RuntimeError("simulated render failure")
+
+    monkeypatch.setattr(pipeline_module, "render_precomputed_square", fail_render)
+
+    with pytest.raises(RuntimeError, match="simulated render failure"):
+        run_case(config, steps=["render"], workers=1)
+
+    metadata_path = config.output_root / config.case_id / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["run_state"] == "interrupted"
+    assert metadata["completed_pose_count"] == 0
+    assert metadata["status_counts"] == {}
 
 
 def test_run_case_writes_legacy_intermediates_and_gallery(monkeypatch, tmp_path):
