@@ -84,10 +84,14 @@ python main.py --case-config configs/case.yaml --workers 8
 - 配置点数是区域上限，不补点。每个区域独立执行确定性 FPS，任意两个实际采样点的 RAS 欧氏距离至少 10 mm；“采样点间隔 1 cm”不表示切面内部像素间距。
 - 食管有效段从原始食管最小 z 到肝脏最大 z，并按完整有效段 z 跨度向下复制。肝脏一、二区合并采样时逐点保留 `liver_region_one`、`liver_region_two` 或重叠组合来源。十二指肠以 1 mm 体素骨架得到近端到远端中心线，中心线只用于定义十二指肠 0 度面和 10 mm 弦切向，不改变 CT 或表面采样点。若自动短毛刺规则无法得到无分叉路径，必须经人工解剖确认后以病例专属 RAS 端点锚点选取未剪枝树中的唯一路径；不得通过任意放大毛刺阈值继续运行。
 - 局部坐标为右手系，采样点位于 100 mm 方形底边中心。旋转采用局部内禀 `Z(偏航) -> Y(俯仰) -> X(滚动)`，矩阵为 `B' = B Rz Ry Rx`。
-- 滚动和俯仰均为 `-5/0/+5` 度。普通区偏航 `-30..+30`、十二指肠球部 `-90..+90`、胰腺特殊区 `-120..+30`，步长均为 5 度，对应每点 117、333、279 个姿态。
+- 2026-08-08 用户批准受控部分恢复旋转范围：滚动为 `-15..+15` 度、俯仰为 `-10..+10` 度，步长均为 5 度；普通区、十二指肠球部和胰腺特殊区偏航仍分别为 `-30..+30`、`-90..+90`、`-120..+30` 度，步长均为 5 度。因此每点分别生成 455、1295、1085 个姿态。该范围是对核心 DOCX 完整滚转/俯仰范围的受控折中，不改写核心文件中的完整原范围。
 - 四顶点在 `rtol=0, atol=1e-9 mm` 下完全相同时强制去重，基础区域优先；该行为不可通过配置关闭。样本 ID 编码来源点和 roll/pitch/yaw，支持稳定断点恢复。
 
-2026-08-07 使用导出的 case 2 真实器官网格只读验收得到 319 个采样点和 43,695 个姿态，其中普通 33,345、胰腺特殊 5,022、十二指肠球部 5,328；85 个肝点的来源为一区 33、一区/二区重叠 12、二区 40。病例 2 的完整十二指肠骨架为 190 节点/189 边的单连通树；用户按三平面可视化确认 E1 `[19, 24, 700]` 到 E2 `[-33, 1, 664]` 为主路径，选中 166 点、长度 224.7411 mm。以上均为本次输入与实现的验收结果，不是其他病例的固定数量或核心 DOCX 原文参数。
+### Controlled rotation range (English)
+
+As approved on 2026-08-08, roll uses `-15..+15 degrees` and pitch uses `-10..+10 degrees`, both at 5-degree steps. The standard, duodenal-bulb, and pancreas-special yaw policies remain unchanged, producing 455, 1295, and 1085 poses per point. This is a controlled partial restoration; it does not rewrite the complete ranges in the core DOCX and does not change sampling points or the 10 mm minimum spacing.
+
+历史旧角度证据：2026-08-07 在当时滚动/俯仰均为 `-5/0/+5` 度的合同下，使用导出的 case 2 真实器官网格只读验收得到 319 个采样点和 43,695 个姿态，其中普通 33,345、胰腺特殊 5,022、十二指肠球部 5,328；85 个肝点的来源为一区 33、一区/二区重叠 12、二区 40。病例 2 的完整十二指肠骨架为 190 节点/189 边的单连通树；用户按三平面可视化确认 E1 `[19, 24, 700]` 到 E2 `[-33, 1, 664]` 为主路径，选中 166 点、长度 224.7411 mm。以上仅是 2026-08-07 旧角度合同下本次输入与实现的历史验收结果，不是当前姿态数量、其他病例的固定数量或核心 DOCX 原文参数。
 
 `gallery/` 仅包含具备完整血管截面特征的可检索样本，支持 portal/hepatic 或 artery/vein 标签对；`unindexed/` 保留无血管截面的合格图像；`rejected/` 保留黑色区域或直线黑边不合格样本。使用 `ct_vascular_resampling.registration_adapter.load_gallery_database()` 可将 `gallery.jsonl` 载入外部 `2021.py` CBIR 实现。
 
