@@ -4,7 +4,7 @@ import importlib
 
 import pytest
 
-from ct_vascular_resampling.config import REQUIRED_ORGAN_IDS, load_case_config
+from ct_vascular_resampling.config import ORGAN_BOUNDARY_MODEL_IDS, REQUIRED_ORGAN_IDS, load_case_config
 
 
 DEFAULT_VESSEL_MODELS = """  - id: portal_tree
@@ -15,6 +15,15 @@ DEFAULT_VESSEL_MODELS = """  - id: portal_tree
     path: hepatic.ply
     label: hepatic
     color: [0, 188, 212]"""
+
+
+def test_organ_boundary_models_include_dual_role_vessels():
+    assert len(ORGAN_BOUNDARY_MODEL_IDS) == 14
+    assert ORGAN_BOUNDARY_MODEL_IDS["aorta"] == "aorta"
+    assert ORGAN_BOUNDARY_MODEL_IDS["inferior_vena_cava"] == "inferior_vena_cava"
+    assert ORGAN_BOUNDARY_MODEL_IDS["portal_vein"] == "portal_vein_and_splenic_vein"
+    assert "bile_duct" not in ORGAN_BOUNDARY_MODEL_IDS
+    assert "common_bile_duct" not in ORGAN_BOUNDARY_MODEL_IDS
 
 
 def _case_yaml(organ_models: str, vessel_models: str = DEFAULT_VESSEL_MODELS) -> str:

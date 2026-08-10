@@ -20,7 +20,14 @@ from PIL import Image
 import trimesh
 
 from .artifacts import write_square_samples_ply, write_surface_samples_ply
-from .config import DEFAULT_ORGAN_COLORS, ORGAN_BOUNDARY_IDS, CTConfig, CaseConfig, FilterConfig
+from .config import (
+    DEFAULT_ORGAN_COLORS,
+    ORGAN_BOUNDARY_IDS,
+    ORGAN_BOUNDARY_MODEL_IDS,
+    CTConfig,
+    CaseConfig,
+    FilterConfig,
+)
 from .ct_resampling import (
     CTVolume,
     diagnose_square_fov,
@@ -266,6 +273,19 @@ class PreparedOrgan:
     color: tuple[int, int, int]
     mesh: trimesh.Trimesh
     bounds: np.ndarray
+
+
+def _load_prepared_organs(config: CaseConfig) -> list[PreparedOrgan]:
+    organs: list[PreparedOrgan] = []
+    for label, model_id in ORGAN_BOUNDARY_MODEL_IDS.items():
+        mesh = load_surface_mesh(
+            config.organ_models[model_id],
+            input_coordinate_system=config.geometry.input_coordinate_system,
+        ).mesh
+        organs.append(
+            PreparedOrgan(model_id, label, DEFAULT_ORGAN_COLORS[label], mesh, mesh.bounds.copy())
+        )
+    return organs
 
 
 @dataclass(frozen=True)
@@ -723,13 +743,7 @@ def run_case(
             )
             for vessel in config.vessel_models
         ]
-        organs = []
-        for identifier in ORGAN_BOUNDARY_IDS:
-            mesh = load_surface_mesh(
-                config.organ_models[identifier],
-                input_coordinate_system=config.geometry.input_coordinate_system,
-            ).mesh
-            organs.append(PreparedOrgan(identifier, identifier, DEFAULT_ORGAN_COLORS[identifier], mesh, mesh.bounds.copy()))
+        organs = _load_prepared_organs(config)
         effective_workers = workers if workers is not None else config.runtime.workers
         if effective_workers < 1:
             raise ValueError("workers 必须大于零")

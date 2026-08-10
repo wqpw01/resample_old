@@ -67,3 +67,42 @@ def test_renderer_keeps_vessel_outputs_isolated_and_draws_organs_beneath_vessels
     assert rendered.organ_vessel_boundary.getpixel((4, 4)) == vessel_color
     assert rendered.organ_labels == ["liver", "stomach"]
     assert rendered.features == [{"label": "portal", "x_mm": 5.0, "y_mm": 5.0, "area_mm2": 36.0}]
+
+
+def test_dual_role_organ_layers_do_not_change_vessel_outputs():
+    contour = SectionContour(
+        points_mm=np.asarray([[2.0, 2.0], [8.0, 2.0], [8.0, 8.0], [2.0, 8.0]]),
+        complete=True,
+        centroid_mm=np.asarray([5.0, 5.0]),
+        area_mm2=36.0,
+    )
+    ct = np.full((20, 20), 127, dtype=np.uint8)
+    vessels = [VesselLayer("artery_tree", "artery", (255, 82, 0), [contour])]
+
+    baseline = render_sample_images(ct, 10.0, 10.0, vessels)
+    dual_role = render_sample_images(
+        ct,
+        10.0,
+        10.0,
+        vessels,
+        organ_layers=[
+            rendering.OrganLayer("aorta", "aorta", (255, 82, 0), [contour]),
+            rendering.OrganLayer(
+                "inferior_vena_cava",
+                "inferior_vena_cava",
+                (0, 188, 212),
+                [contour],
+            ),
+            rendering.OrganLayer(
+                "portal_vein_and_splenic_vein",
+                "portal_vein",
+                (0, 188, 212),
+                [contour],
+            ),
+        ],
+    )
+
+    assert dual_role.organ_labels == ["aorta", "inferior_vena_cava", "portal_vein"]
+    assert dual_role.features == baseline.features
+    assert dual_role.boundary_only.tobytes() == baseline.boundary_only.tobytes()
+    assert dual_role.ct_overlay.tobytes() == baseline.ct_overlay.tobytes()

@@ -8,6 +8,7 @@ import SimpleITK as sitk
 import trimesh
 from pathlib import Path
 from dataclasses import replace
+from types import SimpleNamespace
 
 from ct_vascular_resampling.config import (
     CTConfig,
@@ -26,6 +27,32 @@ import ct_vascular_resampling.pipeline as pipeline_module
 from ct_vascular_resampling.pipeline import PreparedVessel, render_precomputed_square, render_square_sample, run_case
 from ct_vascular_resampling.resampling_backend import CachedCpuBackend
 from ct_vascular_resampling.sampling_pipeline import SquareSample, SurfaceSamples
+
+
+def test_prepared_organs_use_canonical_labels_and_existing_model_paths(monkeypatch, tmp_path):
+    mesh = trimesh.creation.box()
+    organ_models = {
+        identifier: tmp_path / f"{identifier}.ply"
+        for identifier in pipeline_module.ORGAN_BOUNDARY_MODEL_IDS.values()
+    }
+    loaded_paths = []
+
+    def load(path, *, input_coordinate_system):
+        loaded_paths.append((path, input_coordinate_system))
+        return SimpleNamespace(mesh=mesh.copy())
+
+    monkeypatch.setattr(pipeline_module, "load_surface_mesh", load)
+    config = SimpleNamespace(
+        organ_models=organ_models,
+        geometry=SimpleNamespace(input_coordinate_system="LPS"),
+    )
+
+    prepared = pipeline_module._load_prepared_organs(config)
+
+    by_label = {item.label: item for item in prepared}
+    assert len(prepared) == 14
+    assert by_label["portal_vein"].identifier == "portal_vein_and_splenic_vein"
+    assert loaded_paths.count((organ_models["portal_vein_and_splenic_vein"], "LPS")) == 1
 
 
 def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):
