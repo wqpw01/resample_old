@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "无 P/N/D 输入的 CT 与血管模型重采样图库"
 requires-python = ">=3.12"
 
+[tool.setuptools.package-data]
+ct_vascular_resampling = ["data/*.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

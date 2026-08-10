@@ -1,0 +1,165 @@
+{
+  "schema_version": "eus-possible-organs/v1",
+  "organs": [
+    {
+      "organ_label": "adrenal_gland_left",
+      "eus_label_ids": [
+        22
+      ],
+      "eus_label_names": [
+        "左侧肾上腺"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "adrenal_gland_right",
+      "eus_label_ids": [
+        23
+      ],
+      "eus_label_names": [
+        "右侧肾上腺"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "aorta",
+      "eus_label_ids": [
+        3,
+        33
+      ],
+      "eus_label_names": [
+        "S3 腹主动脉",
+        "腹主动脉"
+      ],
+      "role": "organ_and_vessel",
+      "vessel_type": "artery",
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "duodenum",
+      "eus_label_ids": [
+        10,
+        21,
+        41
+      ],
+      "eus_label_names": [
+        "S10 壶腹部",
+        "壶腹部",
+        "十二指肠肠腔"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "inferior_vena_cava",
+      "eus_label_ids": [
+        30
+      ],
+      "eus_label_names": [
+        "下腔静脉"
+      ],
+      "role": "organ_and_vessel",
+      "vessel_type": "vein",
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "kidney_left",
+      "eus_label_ids": [
+        24
+      ],
+      "eus_label_names": [
+        "左侧肾脏"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "kidney_right",
+      "eus_label_ids": [
+        25
+      ],
+      "eus_label_names": [
+        "右侧肾脏"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "liver",
+      "eus_label_ids": [
+        1,
+        2,
+        8,
+        14
+      ],
+      "eus_label_names": [
+        "S1 第二肝门",
+        "S2 肝脏",
+        "S8 第一肝门",
+        "肝脏"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "pancreas",
+      "eus_label_ids": [
+        4,
+        5,
+        7,
+        9,
+        11,
+        19,
+        20
+      ],
+      "eus_label_names": [
+        "S4 胰体",
+        "S5 胰尾",
+        "S7 胰颈",
+        "S9 胰头",
+        "S11 钩突",
+        "胰腺",
+        "胰管"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    },
+    {
+      "organ_label": "portal_vein",
+      "eus_label_ids": [
+        26,
+        27
+      ],
+      "eus_label_names": [
+        "门静脉（包括分支",
+        "门静脉汇合部"
+      ],
+      "role": "organ_and_vessel",
+      "vessel_type": "vein",
+      "canonical_vessel_label_id": 26
+    },
+    {
+      "organ_label": "spleen",
+      "eus_label_ids": [
+        6,
+        18
+      ],
+      "eus_label_names": [
+        "S6 脾门",
+        "脾脏"
+      ],
+      "role": "organ",
+      "vessel_type": null,
+      "canonical_vessel_label_id": null
+    }
+  ]
+}
