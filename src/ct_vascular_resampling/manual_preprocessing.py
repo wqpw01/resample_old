@@ -164,6 +164,15 @@ def write_manual_segmentation_case(
     ]
     if missing:
         raise ValueError(f"手工分割缺少必要器官标签: {', '.join(missing)}")
+    required_source_values = {
+        value
+        for values in MANUAL_ORGAN_LABEL_VALUES.values()
+        for value in values
+    }
+    present_source_values = {int(value) for value in np.unique(labels)}
+    missing_source_values = sorted(required_source_values - present_source_values)
+    if missing_source_values:
+        raise ValueError(f"手工分割缺少必要源标签值: {missing_source_values}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(

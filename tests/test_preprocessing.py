@@ -253,7 +253,10 @@ def test_manual_preprocessing_writes_only_organs_and_references_external_vessels
     assert loaded.vessel_models[1].path == inputs["vein"].resolve()
 
 
-@pytest.mark.parametrize("failure", ["geometry", "missing_label", "missing_external_vessel"])
+@pytest.mark.parametrize(
+    "failure",
+    ["geometry", "missing_label", "missing_portal_segment", "missing_external_vessel"],
+)
 def test_manual_preprocessing_preflight_failures_write_nothing(tmp_path, failure):
     from ct_vascular_resampling.manual_preprocessing import write_manual_segmentation_case
 
@@ -266,6 +269,13 @@ def test_manual_preprocessing_preflight_failures_write_nothing(tmp_path, failure
         segmentation = sitk.ReadImage(str(inputs["segmentation"]))
         labels = sitk.GetArrayFromImage(segmentation)
         labels[labels == 14] = 0
+        replacement = sitk.GetImageFromArray(labels)
+        replacement.CopyInformation(segmentation)
+        sitk.WriteImage(replacement, str(inputs["segmentation"]))
+    elif failure == "missing_portal_segment":
+        segmentation = sitk.ReadImage(str(inputs["segmentation"]))
+        labels = sitk.GetArrayFromImage(segmentation)
+        labels[labels == 37] = 0
         replacement = sitk.GetImageFromArray(labels)
         replacement.CopyInformation(segmentation)
         sitk.WriteImage(replacement, str(inputs["segmentation"]))
