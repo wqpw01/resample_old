@@ -35,6 +35,31 @@ def _rendered():
     )
 
 
+def _manual_rendered(*, original_features: bool = True):
+    base = _rendered() if original_features else render_sample_images(
+        np.full((20, 20), 127, dtype=np.uint8),
+        10.0,
+        10.0,
+        [],
+    )
+    boundary = Image.new("RGB", (20, 20), "white")
+    boundary.putpixel((4, 4), (255, 0, 0))
+    boundary.putpixel((0, 8), (0, 0, 255))
+    overlay = base.ct.convert("RGB")
+    overlay.putpixel((4, 4), (255, 0, 0))
+    overlay.putpixel((0, 8), (0, 0, 255))
+    return replace(
+        base,
+        organ_labels=["aorta", "inferior_vena_cava"],
+        eus_vessel_boundary=boundary,
+        ct_eus_vessel_overlay=overlay,
+        eus_vessel_labels=["aorta", "inferior_vena_cava"],
+        eus_vessel_features=[
+            {"label": "aorta", "x_mm": 2.0, "y_mm": 2.0, "area_mm2": 1.0}
+        ],
+    )
+
+
 def test_gallery_writer_routes_featured_sample_to_gallery_with_compatible_record(tmp_path):
     writer = GalleryWriter(tmp_path / "case_001", case_id="case_001")
     status = writer.write_sample(
@@ -59,6 +84,217 @@ def test_gallery_writer_routes_featured_sample_to_gallery_with_compatible_record
     assert record["eus_candidate_organ_labels"] == ["liver"]
     assert record["pixel_spacing_mm"] == [10.0 / 19.0, 10.0 / 19.0]
     assert writer.completed_status("stomach-000001") == "gallery"
+
+
+def test_manual_gallery_writer_persists_separate_eus_vessel_schema_and_images(tmp_path):
+    case_directory = tmp_path / "case_001"
+    writer = GalleryWriter(
+        case_directory,
+        case_id="case_001",
+        manual_segmentation_enabled=True,
+    )
+
+    status = writer.write_sample(
+        "stomach-000001",
+        "stomach",
+        np.asarray([1.0, 2.0, 3.0]),
+        np.asarray([0.0, 0.0, 1.0]),
+        _frame(),
+        _manual_rendered(),
+        QualityResult(True, None, 0.0),
+    )
+
+    record = json.loads((case_directory / "gallery/gallery.jsonl").read_text(encoding="utf-8"))
+    assert status == "gallery"
+    assert record["eus_vessel_metadata_schema_version"] == "eus-vessel-metadata/v1"
+    assert record["eus_vessel_labels"] == ["aorta", "inferior_vena_cava"]
+    assert record["eus_vessel_features"] == [
+        {"label": "aorta", "x_mm": 2.0, "y_mm": 2.0, "area_mm2": 1.0}
+    ]
+    assert record["eus_vessel_boundary_png"] == "eus_vessel_boundary/stomach-000001.png"
+    assert record["ct_eus_vessel_overlay_png"] == "ct_eus_vessel_overlay/stomach-000001.png"
+    assert (case_directory / "gallery" / record["eus_vessel_boundary_png"]).is_file()
+    assert (case_directory / "gallery" / record["ct_eus_vessel_overlay_png"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("accepted", "expected_status"),
+    [(True, "unindexed"), (False, "rejected")],
+)
+def test_manual_eus_features_never_promote_originally_unindexed_or_rejected_samples(
+    tmp_path,
+    accepted,
+    expected_status,
+):
+    case_directory = tmp_path / "case_001"
+    writer = GalleryWriter(
+        case_directory,
+        case_id="case_001",
+        manual_segmentation_enabled=True,
+    )
+
+    status = writer.write_sample(
+        "sample",
+        "stomach",
+        np.zeros(3),
+        np.asarray([0.0, 0.0, 1.0]),
+        _frame(),
+        _manual_rendered(original_features=False),
+        QualityResult(accepted, None if accepted else "black_ratio", 0.8),
+    )
+
+    record = json.loads(
+        (case_directory / expected_status / f"{expected_status}.jsonl").read_text(encoding="utf-8")
+    )
+    assert status == expected_status
+    assert not any(key.startswith("eus_vessel_") for key in record)
+    assert "ct_eus_vessel_overlay_png" not in record
+    assert not (case_directory / expected_status / "eus_vessel_boundary").exists()
+    assert not (case_directory / expected_status / "ct_eus_vessel_overlay").exists()
+
+
+def test_manual_gallery_writer_requires_all_eus_render_products_before_writing(tmp_path):
+    case_directory = tmp_path / "case_001"
+    writer = GalleryWriter(
+        case_directory,
+        case_id="case_001",
+        manual_segmentation_enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="EUS|eus_vessel"):
+        writer.write_sample(
+            "sample",
+            "stomach",
+            np.zeros(3),
+            np.asarray([0.0, 0.0, 1.0]),
+            _frame(),
+            _rendered(),
+            QualityResult(True, None, 0.0),
+        )
+
+    assert not (case_directory / "manifest.jsonl").exists()
+
+
+def _write_valid_manual_gallery(case_directory):
+    writer = GalleryWriter(
+        case_directory,
+        case_id="case_001",
+        manual_segmentation_enabled=True,
+    )
+    writer.write_sample(
+        "sample",
+        "stomach",
+        np.zeros(3),
+        np.asarray([0.0, 0.0, 1.0]),
+        _frame(),
+        _manual_rendered(),
+        QualityResult(True, None, 0.0),
+    )
+    return json.loads((case_directory / "gallery/gallery.jsonl").read_text(encoding="utf-8"))
+
+
+def _rewrite_manual_record(case_directory, record):
+    serialized = json.dumps(record) + "\n"
+    (case_directory / "manifest.jsonl").write_text(serialized, encoding="utf-8")
+    (case_directory / "gallery/gallery.jsonl").write_text(serialized, encoding="utf-8")
+
+
+def _remove_eus_schema(record):
+    record.pop("eus_vessel_metadata_schema_version")
+
+
+def _duplicate_eus_label(record):
+    record["eus_vessel_labels"] = ["aorta", "aorta"]
+
+
+def _unknown_eus_label(record):
+    record["eus_vessel_labels"] = ["unknown"]
+
+
+def _unknown_feature_label(record):
+    record["eus_vessel_features"][0]["label"] = "unknown"
+
+
+def _nonfinite_feature(record):
+    record["eus_vessel_features"][0]["area_mm2"] = float("nan")
+
+
+def _feature_label_not_visible(record):
+    record["eus_vessel_features"][0]["label"] = "portal_vein"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (_remove_eus_schema, "schema|旧版"),
+        (_duplicate_eus_label, "eus_vessel_labels|排序|重复"),
+        (_unknown_eus_label, "eus_vessel_labels|unknown"),
+        (_unknown_feature_label, "eus_vessel_features|unknown"),
+        (_nonfinite_feature, "有限|area_mm2"),
+        (_feature_label_not_visible, "当前切面|eus_vessel_labels"),
+    ],
+)
+def test_manual_gallery_writer_rejects_corrupt_eus_metadata_on_resume(
+    tmp_path,
+    mutation,
+    message,
+):
+    case_directory = tmp_path / "case_001"
+    record = _write_valid_manual_gallery(case_directory)
+    mutation(record)
+    _rewrite_manual_record(case_directory, record)
+
+    with pytest.raises(ValueError, match=message):
+        GalleryWriter(
+            case_directory,
+            case_id="case_001",
+            manual_segmentation_enabled=True,
+        )
+
+
+def test_manual_gallery_writer_rejects_missing_eus_image_on_resume(tmp_path):
+    case_directory = tmp_path / "case_001"
+    record = _write_valid_manual_gallery(case_directory)
+    (case_directory / "gallery" / record["eus_vessel_boundary_png"]).unlink()
+
+    with pytest.raises(ValueError, match="不存在|eus_vessel_boundary"):
+        GalleryWriter(
+            case_directory,
+            case_id="case_001",
+            manual_segmentation_enabled=True,
+        )
+
+
+def test_legacy_gallery_writer_refuses_manual_schema_mixing(tmp_path):
+    case_directory = tmp_path / "case_001"
+    _write_valid_manual_gallery(case_directory)
+
+    with pytest.raises(ValueError, match="手工分割|schema|混用"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
+def test_manual_gallery_writer_keeps_fov_exclusion_free_of_eus_fields(tmp_path):
+    case_directory = tmp_path / "case_001"
+    writer = GalleryWriter(
+        case_directory,
+        case_id="case_001",
+        manual_segmentation_enabled=True,
+    )
+
+    writer.write_fov_exclusion(
+        sample_id="outside",
+        organ="stomach",
+        probe_point_world=np.zeros(3),
+        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
+        frame=_frame(),
+        fov_diagnostics={"contains_ct_fov_exceedance": True},
+        ct_image=Image.fromarray(np.zeros((20, 20), dtype=np.uint8)),
+        resampling_backend="cpu",
+    )
+
+    record = json.loads((case_directory / "excluded_fov.jsonl").read_text(encoding="utf-8"))
+    assert not any(key.startswith("eus_vessel_") for key in record)
+    assert "ct_eus_vessel_overlay_png" not in record
 
 
 def test_gallery_writer_routes_empty_and_rejected_samples_to_separate_directories(tmp_path):

@@ -13,15 +13,27 @@ from typing import Iterable
 import numpy as np
 from PIL import Image
 
-from .config import ORGAN_BOUNDARY_IDS
+from .config import EUS_VESSEL_IDS, ORGAN_BOUNDARY_IDS
 from .eus_organs import (
     EUSOrganCatalog,
     EUS_ORGAN_METADATA_SCHEMA_VERSION,
     load_eus_organ_catalog,
 )
 from .geometry import SquareFrame
+from .manual_segmentation import EUS_VESSEL_METADATA_SCHEMA_VERSION
 from .quality import QualityResult
 from .rendering import RenderedSample
+
+
+_EUS_VESSEL_RECORD_FIELDS = frozenset(
+    {
+        "eus_vessel_metadata_schema_version",
+        "eus_vessel_labels",
+        "eus_vessel_features",
+        "eus_vessel_boundary_png",
+        "ct_eus_vessel_overlay_png",
+    }
+)
 
 
 def _vector(value: np.ndarray) -> list[float]:
@@ -72,6 +84,47 @@ def validate_gallery_organ_metadata(
         raise ValueError(f"gallery 组合图不存在: {combined_path}")
 
 
+def validate_gallery_eus_vessel_metadata(record: dict, gallery_directory: str | Path) -> None:
+    """只读校验手工分割 Gallery 的三类 EUS 血管字段和图片。"""
+
+    if record.get("eus_vessel_metadata_schema_version") != EUS_VESSEL_METADATA_SCHEMA_VERSION:
+        raise ValueError("检测到旧版 gallery 记录，缺少当前 EUS 血管 metadata schema")
+    labels = record.get("eus_vessel_labels")
+    features = record.get("eus_vessel_features")
+    boundary_path = record.get("eus_vessel_boundary_png")
+    overlay_path = record.get("ct_eus_vessel_overlay_png")
+    if not isinstance(labels, list) or labels != sorted(set(labels)):
+        raise ValueError("gallery eus_vessel_labels 必须是排序去重后的字符串列表")
+    if any(not isinstance(label, str) or label not in EUS_VESSEL_IDS for label in labels):
+        raise ValueError(f"gallery eus_vessel_labels 包含不支持的标签: {labels}")
+    if not isinstance(features, list):
+        raise ValueError("gallery eus_vessel_features 必须是列表")
+    for feature in features:
+        if not isinstance(feature, dict) or set(feature) != {"label", "x_mm", "y_mm", "area_mm2"}:
+            raise ValueError("gallery eus_vessel_features 项字段无效")
+        label = feature["label"]
+        if not isinstance(label, str) or label not in EUS_VESSEL_IDS:
+            raise ValueError(f"gallery eus_vessel_features 包含不支持的标签: {label}")
+        if label not in labels:
+            raise ValueError("gallery eus_vessel_features 标签必须出现在当前切面的 eus_vessel_labels 中")
+        for field in ("x_mm", "y_mm", "area_mm2"):
+            value = feature[field]
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, float, np.integer, np.floating))
+                or not np.isfinite(value)
+            ):
+                raise ValueError(f"gallery eus_vessel_features.{field} 必须是有限数值")
+        if float(feature["area_mm2"]) <= 0.0:
+            raise ValueError("gallery eus_vessel_features.area_mm2 必须大于零")
+    for field, relative in (
+        ("eus_vessel_boundary_png", boundary_path),
+        ("ct_eus_vessel_overlay_png", overlay_path),
+    ):
+        if not isinstance(relative, str) or not (Path(gallery_directory) / relative).is_file():
+            raise ValueError(f"gallery {field} 不存在或路径无效: {relative}")
+
+
 def write_rectangles_ply(path: str | Path, frames: Iterable[SquareFrame]) -> None:
     """以无 face 的连续四点 ASCII PLY 原子写出方形。"""
 
@@ -111,11 +164,13 @@ class GalleryWriter:
         *,
         required_core_design_sha256: str | None = None,
         repair_missing_state_records: bool = True,
+        manual_segmentation_enabled: bool = False,
     ):
         self.case_directory = Path(case_directory)
         self.case_id = case_id
         self.required_core_design_sha256 = required_core_design_sha256
         self.repair_missing_state_records = repair_missing_state_records
+        self.manual_segmentation_enabled = manual_segmentation_enabled
         self.eus_organ_catalog = load_eus_organ_catalog()
         self.manifest_path = self.case_directory / "manifest.jsonl"
         self.case_directory.mkdir(parents=True, exist_ok=True)
@@ -170,6 +225,14 @@ class GalleryWriter:
             self.case_directory / "gallery",
             self.eus_organ_catalog,
         )
+        has_eus_vessel_fields = any(field in record for field in _EUS_VESSEL_RECORD_FIELDS)
+        if self.manual_segmentation_enabled:
+            validate_gallery_eus_vessel_metadata(
+                record,
+                self.case_directory / "gallery",
+            )
+        elif has_eus_vessel_fields:
+            raise ValueError("旧模式输出根包含手工分割 EUS 血管 schema，禁止混用")
 
     def _state_manifest_paths(self) -> dict[str, Path]:
         return {
@@ -391,6 +454,19 @@ class GalleryWriter:
             return self.completed_statuses[sample_id]
         self._validate_pose_record(pose_metadata or {})
         status = self._status_for(rendered, quality)
+        if status == "gallery" and self.manual_segmentation_enabled:
+            if (
+                rendered.eus_vessel_boundary is None
+                or rendered.ct_eus_vessel_overlay is None
+                or rendered.eus_vessel_features is None
+                or rendered.eus_vessel_labels is None
+            ):
+                raise ValueError("手工分割 Gallery 缺少必需的 eus_vessel 渲染结果")
+            if (
+                rendered.eus_vessel_boundary.size != rendered.ct.size
+                or rendered.ct_eus_vessel_overlay.size != rendered.ct.size
+            ):
+                raise ValueError("手工分割 EUS 血管图片尺寸与 CT 不一致")
         root = self.case_directory / status
         ct_path = root / "ct" / f"{sample_id}.png"
         boundary_path = root / "boundary_only" / f"{sample_id}.png"
@@ -399,8 +475,15 @@ class GalleryWriter:
         self._save_png(rendered.boundary_only, boundary_path)
         self._save_png(rendered.ct_overlay, overlay_path)
         combined_path = root / "organ_vessel_boundary" / f"{sample_id}.png"
+        eus_boundary_path = root / "eus_vessel_boundary" / f"{sample_id}.png"
+        ct_eus_overlay_path = root / "ct_eus_vessel_overlay" / f"{sample_id}.png"
         if status == "gallery":
             self._save_png(rendered.organ_vessel_boundary, combined_path)
+            if self.manual_segmentation_enabled:
+                assert rendered.eus_vessel_boundary is not None
+                assert rendered.ct_eus_vessel_overlay is not None
+                self._save_png(rendered.eus_vessel_boundary, eus_boundary_path)
+                self._save_png(rendered.ct_eus_vessel_overlay, ct_eus_overlay_path)
         width_px, height_px = rendered.ct.size
         record = {
             "frame_id": self.case_id,
@@ -442,6 +525,12 @@ class GalleryWriter:
             record["eus_candidate_organ_labels"] = self.eus_organ_catalog.candidate_labels(
                 rendered.organ_labels
             )
+            if self.manual_segmentation_enabled:
+                record["eus_vessel_metadata_schema_version"] = EUS_VESSEL_METADATA_SCHEMA_VERSION
+                record["eus_vessel_labels"] = rendered.eus_vessel_labels
+                record["eus_vessel_features"] = rendered.eus_vessel_features
+                record["eus_vessel_boundary_png"] = str(eus_boundary_path.relative_to(root))
+                record["ct_eus_vessel_overlay_png"] = str(ct_eus_overlay_path.relative_to(root))
         if resampling_backend is not None:
             record["resampling_backend"] = resampling_backend
         if fov_diagnostics is not None:
