@@ -582,6 +582,12 @@ def test_manual_protocol_records_segmentation_geometry_mappings_and_sources(tmp_
     assert manual["external_reconstructed_vessel_sources"] == protocol["input_provenance"][
         "vessel_models"
     ]
+    for vessel_config, source in zip(
+        config.vessel_models,
+        manual["external_reconstructed_vessel_sources"],
+        strict=True,
+    ):
+        assert source["sha256"] == hashlib.sha256(vessel_config.path.read_bytes()).hexdigest()
     assert protocol["quality_filtering"]["black_ratio_limit"] == 0.60
 
 

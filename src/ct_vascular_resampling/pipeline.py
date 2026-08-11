@@ -118,7 +118,6 @@ def _sha256_path(path: Path) -> str:
     source = path.resolve()
     digest = hashlib.sha256()
     if source.is_file():
-        digest.update(b"file\0")
         with source.open("rb") as handle:
             while chunk := handle.read(1024 * 1024):
                 digest.update(chunk)
