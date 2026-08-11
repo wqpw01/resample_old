@@ -686,7 +686,6 @@ def test_manual_library_summary_counts_visible_labels_and_complete_features(
         "load_gallery_database",
         lambda *_args, **_kwargs: SimpleNamespace(features=[]),
     )
-
     run_case(config, steps=["index"])
 
     summary = json.loads((case_directory / "library_summary.json").read_text(encoding="utf-8"))
@@ -701,6 +700,24 @@ def test_manual_library_summary_counts_visible_labels_and_complete_features(
         "portal_vein": [170, 85, 255],
     }
     assert summary["eus_vessel_label_values"]["portal_vein"] == [26, 33, 34, 35, 36, 37]
+
+
+def test_run_refuses_orphaned_metadata_before_render(monkeypatch, tmp_path):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    case_directory = config.output_root / config.case_id
+    metadata = pipeline_module._run_protocol_metadata(config, None)
+    pipeline_module._write_run_metadata(case_directory, metadata)
+    metadata_before = (case_directory / "run_metadata.json").read_bytes()
+    with pytest.raises(ValueError, match="run_metadata|manifest|不完整"):
+        run_case(config, steps=["render"], workers=1)
+
+    assert (case_directory / "run_metadata.json").read_bytes() == metadata_before
+    assert not (case_directory / "manifest.jsonl").exists()
 
 
 def test_manual_run_loads_labels_once_and_samples_same_square_batch_as_ct(monkeypatch, tmp_path):
@@ -997,6 +1014,32 @@ def test_recover_interrupted_run_metadata_rebuilds_audited_protocol(monkeypatch,
     assert ct_path.read_bytes() == ct_before
 
 
+def test_manual_recovery_refuses_to_invent_missing_original_protocol(monkeypatch, tmp_path):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    run_case(config, steps=["render"], workers=1)
+    case_directory = config.output_root / config.case_id
+    metadata_path = case_directory / "run_metadata.json"
+    metadata_path.unlink()
+    manifest_before = (case_directory / "manifest.jsonl").read_bytes()
+
+    with pytest.raises(ValueError, match="手工分割|原始.*协议|无法.*重建|新输出"):
+        pipeline_module.recover_interrupted_run_metadata(
+            config,
+            expected_completed_count=1,
+            reason="sighup",
+            exit_code=129,
+            recovered_at_utc="2026-08-11T12:00:00Z",
+        )
+
+    assert not metadata_path.exists()
+    assert (case_directory / "manifest.jsonl").read_bytes() == manifest_before
+
+
 def test_recover_interrupted_run_metadata_refuses_existing_metadata(monkeypatch, tmp_path):
     config, outside_sample = _single_fov_case(tmp_path)
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
@@ -1126,6 +1169,36 @@ def test_recovered_metadata_resumes_only_pending_samples(monkeypatch, tmp_path):
     assert final_metadata["completed_pose_count"] == 2
     assert final_metadata["compatible_completed_build_git_commits"] == [interrupted_commit]
     assert final_metadata["recovery_history"][0]["exit_code"] == 129
+
+
+def test_changed_protocol_is_rejected_before_state_manifest_repair(monkeypatch, tmp_path):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    run_case(config, steps=["render"], workers=1)
+    case_directory = config.output_root / config.case_id
+    state_manifest = case_directory / "excluded_fov.jsonl"
+    state_manifest.unlink()
+    root_before = (case_directory / "manifest.jsonl").read_bytes()
+    changed = replace(
+        config,
+        manual_segmentation=replace(
+            config.manual_segmentation,
+            eus_vessel_colors={
+                **config.manual_segmentation.eus_vessel_colors,
+                "aorta": (254, 0, 0),
+            },
+        ),
+    )
+
+    with pytest.raises(ValueError, match="运行协议|配置|不一致"):
+        run_case(changed, steps=["render"], workers=1)
+
+    assert not state_manifest.exists()
+    assert (case_directory / "manifest.jsonl").read_bytes() == root_before
 
 
 def test_run_case_writes_legacy_intermediates_and_gallery(monkeypatch, tmp_path):

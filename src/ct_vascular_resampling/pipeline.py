@@ -778,6 +778,11 @@ def recover_interrupted_run_metadata(
     metadata_path = config.output_root / config.case_id / "run_metadata.json"
     if metadata_path.exists():
         raise FileExistsError(f"运行元数据已存在，拒绝覆盖: {metadata_path}")
+    if config.manual_segmentation is not None:
+        raise ValueError(
+            "手工分割运行缺少原始 run_metadata.json，无法证明 segmentation、映射、颜色和阈值协议；"
+            "拒绝重建元数据，请使用保留的原始元数据或新的输出目录"
+        )
     if recovered_at_utc is None:
         recovered_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     else:
@@ -893,6 +898,20 @@ def run_case(
     compatible_build_git_commits: set[str] = set()
     calibration_samples: list[SquareSample] = []
     if "render" in selected:
+        metadata_path = case_directory / "run_metadata.json"
+        manifest_path = case_directory / "manifest.jsonl"
+        manifest_has_records = manifest_path.is_file() and manifest_path.stat().st_size > 0
+        if manifest_has_records:
+            if not metadata_path.is_file():
+                raise ValueError("已有 manifest.jsonl 但缺少 run_metadata.json，无法验证恢复运行协议")
+            try:
+                previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as error:
+                raise ValueError(f"无法读取既有运行元数据: {error}") from error
+            if previous_metadata.get("resume_protocol_sha256") != protocol_metadata["resume_protocol_sha256"]:
+                raise ValueError("当前配置、设计或构建与既有结果的运行协议不一致；请使用新的输出目录")
+        elif metadata_path.is_file():
+            raise ValueError("检测到 run_metadata.json 但缺少非空 manifest.jsonl，输出状态不完整")
         writer = GalleryWriter(
             case_directory,
             config.case_id,
@@ -900,15 +919,7 @@ def run_case(
             manual_segmentation_enabled=config.manual_segmentation is not None,
         )
         if writer.completed_statuses:
-            metadata_path = case_directory / "run_metadata.json"
-            if not metadata_path.is_file():
-                raise ValueError("已有完成姿态但缺少 run_metadata.json，无法验证恢复运行协议")
-            try:
-                previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as error:
-                raise ValueError(f"无法读取既有运行元数据: {error}") from error
-            if previous_metadata.get("resume_protocol_sha256") != protocol_metadata["resume_protocol_sha256"]:
-                raise ValueError("当前配置、设计或构建与既有结果的运行协议不一致；请使用新的输出目录")
+            assert previous_metadata is not None
             raw_compatible_commits = previous_metadata.get("compatible_completed_build_git_commits", [])
             if not isinstance(raw_compatible_commits, list) or any(
                 not isinstance(commit, str) or len(commit) != 40 for commit in raw_compatible_commits
