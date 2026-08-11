@@ -17,6 +17,7 @@ from typing import Iterable
 
 import numpy as np
 from PIL import Image
+import SimpleITK as sitk
 import trimesh
 
 from .artifacts import write_square_samples_ply, write_surface_samples_ply
@@ -29,6 +30,7 @@ from .config import (
     FilterConfig,
     ManualSegmentationConfig,
 )
+from .coordinates import to_ras_direction, to_ras_points
 from .ct_resampling import (
     CTVolume,
     diagnose_square_fov,
@@ -45,6 +47,7 @@ from .eus_organs import (
 from .fov_diagnostics import assess_rejected_fov
 from .gallery import (
     GalleryWriter,
+    validate_gallery_eus_vessel_metadata,
     validate_gallery_organ_metadata,
     write_rectangles_ply,
 )
@@ -134,6 +137,14 @@ def _sha256_path(path: Path) -> str:
     raise FileNotFoundError(f"输入路径不存在: {source}")
 
 
+def _sha256_file_contents(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.resolve().open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _input_provenance(config: CaseConfig) -> dict[str, object]:
     cache: dict[Path, dict[str, object]] = {}
 
@@ -149,7 +160,7 @@ def _input_provenance(config: CaseConfig) -> dict[str, object]:
 
     ct = describe(config.ct_path)
     ct["dicom_series_uid"] = config.dicom_series_uid
-    return {
+    provenance: dict[str, object] = {
         "ct": ct,
         "organ_models": {
             identifier: describe(path) for identifier, path in sorted(config.organ_models.items())
@@ -164,6 +175,90 @@ def _input_provenance(config: CaseConfig) -> dict[str, object]:
             for vessel in config.vessel_models
         ],
     }
+    if config.manual_segmentation is not None:
+        segmentation_path = config.manual_segmentation.path.resolve()
+        provenance["manual_segmentation"] = {
+            "path": str(segmentation_path),
+            "kind": "file",
+            "sha256": _sha256_file_contents(segmentation_path),
+        }
+    return provenance
+
+
+def _manual_segmentation_geometry(
+    path: Path,
+    *,
+    input_coordinate_system: str,
+    canonical_coordinate_system: str,
+) -> dict[str, object]:
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(str(path))
+    reader.ReadImageInformation()
+    if reader.GetDimension() != 3:
+        raise ValueError("手工分割必须是三维标签图")
+    spacing = np.asarray(reader.GetSpacing(), dtype=np.float64)
+    origin_ras = to_ras_points(
+        np.asarray(reader.GetOrigin(), dtype=np.float64),
+        input_coordinate_system,
+    )
+    direction_ras = to_ras_direction(
+        np.asarray(reader.GetDirection(), dtype=np.float64).reshape(3, 3),
+        input_coordinate_system,
+    )
+    return {
+        "input_coordinate_system": input_coordinate_system,
+        "canonical_coordinate_system": canonical_coordinate_system,
+        "size_xyz": [int(value) for value in reader.GetSize()],
+        "spacing_xyz_mm": [float(value) for value in spacing],
+        "origin_ras_mm": [float(value) for value in origin_ras],
+        "direction_ras": [float(value) for value in direction_ras.reshape(-1)],
+    }
+
+
+def _manual_segmentation_protocol(
+    config: CaseConfig,
+    input_provenance: dict[str, object],
+) -> dict[str, object] | None:
+    manual = config.manual_segmentation
+    if manual is None:
+        return None
+    segmentation_path = manual.path.resolve()
+    return {
+        "source": {
+            "path": str(segmentation_path),
+            "sha256": _sha256_file_contents(segmentation_path),
+        },
+        "geometry": _manual_segmentation_geometry(
+            segmentation_path,
+            input_coordinate_system=config.geometry.input_coordinate_system,
+            canonical_coordinate_system=config.geometry.canonical_coordinate_system,
+        ),
+        "label_sampling": {
+            "interpolation": "nearest",
+            "interpolation_order": 0,
+            "prefilter": False,
+            "outside_label_value": 0,
+        },
+        "organ_label_values": {
+            identifier: list(values)
+            for identifier, values in sorted(manual.organ_label_values.items())
+        },
+        "eus_vessel_label_values": {
+            identifier: list(values)
+            for identifier, values in sorted(manual.eus_vessel_label_values.items())
+        },
+        "eus_vessel_colors": {
+            identifier: list(color)
+            for identifier, color in sorted(manual.eus_vessel_colors.items())
+        },
+        "organ_presence_rule": "at_least_one_sampled_pixel",
+        "component_analysis": {
+            "connectivity": 8,
+            "complete_component_rule": "exclude_components_touching_any_image_edge",
+        },
+        "organ_model_sources": input_provenance["organ_models"],
+        "external_reconstructed_vessel_sources": input_provenance["vessel_models"],
+    }
 
 
 def _run_protocol_metadata(
@@ -172,12 +267,13 @@ def _run_protocol_metadata(
 ) -> dict[str, object]:
     endpoint_hints = config.sampling.duodenum_centerline_endpoint_hints_ras_mm
     eus_catalog = load_eus_organ_catalog()
+    input_provenance = _input_provenance(config)
     protocol: dict[str, object] = {
         "coordinate_system": config.geometry.canonical_coordinate_system,
         "input_coordinate_system": config.geometry.input_coordinate_system,
         "core_design_sha256": CORE_DESIGN_SHA256,
         "build_git_commit": _build_git_commit(),
-        "input_provenance": _input_provenance(config),
+        "input_provenance": input_provenance,
         "sampling_configuration": {
             "point_counts": dict(sorted(config.sampling.point_counts.items())),
             "ray_length_mm": config.sampling.ray_length_mm,
@@ -238,6 +334,9 @@ def _run_protocol_metadata(
             "geometry_sources": dict(EUS_ORGAN_GEOMETRY_SOURCES),
         },
     }
+    manual_protocol = _manual_segmentation_protocol(config, input_provenance)
+    if manual_protocol is not None:
+        protocol["manual_segmentation"] = manual_protocol
     canonical = json.dumps(protocol, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     protocol["resume_protocol_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return protocol
@@ -539,8 +638,24 @@ def _write_run_metadata(case_directory: Path, metadata: dict) -> None:
 def _gallery_organ_label_counts(gallery_manifest: Path) -> tuple[Counter[str], Counter[str]]:
     """严格校验 Gallery 器官 schema，并按切面累计通用与 EUS 候选标签。"""
 
+    organ_counts, candidate_counts, _, _ = _gallery_label_counts(
+        gallery_manifest,
+        manual_segmentation_enabled=False,
+    )
+    return organ_counts, candidate_counts
+
+
+def _gallery_label_counts(
+    gallery_manifest: Path,
+    *,
+    manual_segmentation_enabled: bool,
+) -> tuple[Counter[str], Counter[str], Counter[str], Counter[str]]:
+    """逐行严格校验 Gallery，并累计器官及手工 EUS 血管计数。"""
+
     organ_label_counts: Counter[str] = Counter()
     eus_candidate_organ_label_counts: Counter[str] = Counter()
+    eus_vessel_label_counts: Counter[str] = Counter()
+    eus_vessel_feature_counts: Counter[str] = Counter()
     catalog = load_eus_organ_catalog()
     with gallery_manifest.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -551,11 +666,26 @@ def _gallery_organ_label_counts(gallery_manifest: Path) -> tuple[Counter[str], C
                 if record.get("status") != "gallery":
                     raise ValueError("gallery.jsonl 记录状态必须为 gallery")
                 validate_gallery_organ_metadata(record, gallery_manifest.parent, catalog)
+                if manual_segmentation_enabled:
+                    validate_gallery_eus_vessel_metadata(record, gallery_manifest.parent)
+                elif any(str(field).startswith("eus_vessel_") for field in record):
+                    raise ValueError("旧模式 Gallery 不得包含手工 EUS 血管字段")
             except (json.JSONDecodeError, AttributeError, ValueError) as error:
                 raise ValueError(f"gallery 清单第 {line_number} 行损坏: {error}") from error
             organ_label_counts.update(record["organ_labels"])
             eus_candidate_organ_label_counts.update(record["eus_candidate_organ_labels"])
-    return organ_label_counts, eus_candidate_organ_label_counts
+            if manual_segmentation_enabled:
+                eus_vessel_label_counts.update(record["eus_vessel_labels"])
+                eus_vessel_feature_counts.update(
+                    str(feature["label"])
+                    for feature in record["eus_vessel_features"]
+                )
+    return (
+        organ_label_counts,
+        eus_candidate_organ_label_counts,
+        eus_vessel_label_counts,
+        eus_vessel_feature_counts,
+    )
 
 
 def _metadata_with_state(
@@ -1118,33 +1248,64 @@ def run_case(
         label_counts: Counter[str] = Counter()
         organ_label_counts: Counter[str] = Counter()
         eus_candidate_organ_label_counts: Counter[str] = Counter()
+        eus_vessel_label_counts: Counter[str] = Counter()
+        eus_vessel_feature_counts: Counter[str] = Counter()
         if gallery_manifest.is_file():
             from .registration_adapter import load_gallery_database
 
-            organ_label_counts, eus_candidate_organ_label_counts = _gallery_organ_label_counts(
-                gallery_manifest
+            (
+                organ_label_counts,
+                eus_candidate_organ_label_counts,
+                eus_vessel_label_counts,
+                eus_vessel_feature_counts,
+            ) = _gallery_label_counts(
+                gallery_manifest,
+                manual_segmentation_enabled=config.manual_segmentation is not None,
             )
             database = load_gallery_database(gallery_manifest, config.registration_module_path)
             indexed_feature_count = len(database.features)
             for feature in database.features:
                 label_counts.update(str(triplet.label) for triplet in feature.triplets)
         eus_catalog = load_eus_organ_catalog()
-        _write_json_atomic(
-            case_directory / "library_summary.json",
-            {
-                "case_id": config.case_id,
-                "gallery_manifest": "gallery/gallery.jsonl",
-                "gallery_manifest_exists": gallery_manifest.is_file(),
-                "indexed_feature_count": indexed_feature_count,
-                "feature_label_counts": dict(sorted(label_counts.items())),
-                "organ_label_counts": dict(sorted(organ_label_counts.items())),
-                "eus_candidate_organ_label_counts": dict(
-                    sorted(eus_candidate_organ_label_counts.items())
-                ),
-                "eus_possible_organs": eus_catalog.to_record(),
-                "organ_boundary_colors": {
-                    identifier: list(DEFAULT_ORGAN_COLORS[identifier]) for identifier in ORGAN_BOUNDARY_IDS
-                },
+        library_summary: dict[str, object] = {
+            "case_id": config.case_id,
+            "gallery_manifest": "gallery/gallery.jsonl",
+            "gallery_manifest_exists": gallery_manifest.is_file(),
+            "indexed_feature_count": indexed_feature_count,
+            "feature_label_counts": dict(sorted(label_counts.items())),
+            "organ_label_counts": dict(sorted(organ_label_counts.items())),
+            "eus_candidate_organ_label_counts": dict(
+                sorted(eus_candidate_organ_label_counts.items())
+            ),
+            "eus_possible_organs": eus_catalog.to_record(),
+            "organ_boundary_colors": {
+                identifier: list(DEFAULT_ORGAN_COLORS[identifier]) for identifier in ORGAN_BOUNDARY_IDS
             },
-        )
+        }
+        if config.manual_segmentation is not None:
+            library_summary.update(
+                {
+                    "eus_vessel_label_counts": dict(sorted(eus_vessel_label_counts.items())),
+                    "eus_vessel_feature_counts": dict(sorted(eus_vessel_feature_counts.items())),
+                    "eus_vessel_colors": {
+                        identifier: list(color)
+                        for identifier, color in sorted(
+                            config.manual_segmentation.eus_vessel_colors.items()
+                        )
+                    },
+                    "eus_vessel_label_values": {
+                        identifier: list(values)
+                        for identifier, values in sorted(
+                            config.manual_segmentation.eus_vessel_label_values.items()
+                        )
+                    },
+                    "manual_organ_label_values": {
+                        identifier: list(values)
+                        for identifier, values in sorted(
+                            config.manual_segmentation.organ_label_values.items()
+                        )
+                    },
+                }
+            )
+        _write_json_atomic(case_directory / "library_summary.json", library_summary)
     return RunSummary(config.case_id, sampled_counts, len(samples), dict(statuses), False, indexed_feature_count)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import numpy as np
 from PIL import Image
@@ -529,6 +530,171 @@ def _manual_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
         str(label_path),
     )
     return replace(config, manual_segmentation=_manual_segmentation_config(label_path)), sample
+
+
+def test_manual_protocol_records_segmentation_geometry_mappings_and_sources(tmp_path):
+    config, _ = _manual_fov_case(tmp_path)
+    config = replace(
+        config,
+        filtering=replace(config.filtering, black_ratio_limit=0.60),
+    )
+
+    protocol = pipeline_module._run_protocol_metadata(config, None)
+
+    manual = protocol["manual_segmentation"]
+    segmentation_bytes = config.manual_segmentation.path.read_bytes()
+    assert manual["source"] == {
+        "path": str(config.manual_segmentation.path.resolve()),
+        "sha256": hashlib.sha256(segmentation_bytes).hexdigest(),
+    }
+    assert manual["geometry"] == {
+        "input_coordinate_system": "RAS",
+        "canonical_coordinate_system": "RAS",
+        "size_xyz": [16, 16, 16],
+        "spacing_xyz_mm": [1.0, 1.0, 1.0],
+        "origin_ras_mm": [0.0, 0.0, 0.0],
+        "direction_ras": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+    }
+    assert manual["label_sampling"] == {
+        "interpolation": "nearest",
+        "interpolation_order": 0,
+        "prefilter": False,
+        "outside_label_value": 0,
+    }
+    assert manual["organ_label_values"] == {
+        identifier: list(values)
+        for identifier, values in config.manual_segmentation.organ_label_values.items()
+    }
+    assert manual["eus_vessel_label_values"] == {
+        identifier: list(values)
+        for identifier, values in config.manual_segmentation.eus_vessel_label_values.items()
+    }
+    assert manual["eus_vessel_colors"] == {
+        identifier: list(values)
+        for identifier, values in config.manual_segmentation.eus_vessel_colors.items()
+    }
+    assert manual["component_analysis"] == {
+        "connectivity": 8,
+        "complete_component_rule": "exclude_components_touching_any_image_edge",
+    }
+    assert manual["organ_presence_rule"] == "at_least_one_sampled_pixel"
+    assert manual["organ_model_sources"] == protocol["input_provenance"]["organ_models"]
+    assert manual["external_reconstructed_vessel_sources"] == protocol["input_provenance"][
+        "vessel_models"
+    ]
+    assert protocol["quality_filtering"]["black_ratio_limit"] == 0.60
+
+
+def test_manual_protocol_hash_changes_with_segmentation_contract_or_threshold(tmp_path):
+    config, _ = _manual_fov_case(tmp_path)
+    config = replace(
+        config,
+        filtering=replace(config.filtering, black_ratio_limit=0.60),
+    )
+    base_hash = pipeline_module._run_protocol_metadata(config, None)["resume_protocol_sha256"]
+    manual = config.manual_segmentation
+
+    changed_mapping = replace(
+        config,
+        manual_segmentation=replace(
+            manual,
+            organ_label_values={**manual.organ_label_values, "portal_vein": (26, 33, 34, 35, 36, 37)},
+        ),
+    )
+    changed_color = replace(
+        config,
+        manual_segmentation=replace(
+            manual,
+            eus_vessel_colors={**manual.eus_vessel_colors, "aorta": (254, 0, 0)},
+        ),
+    )
+    changed_threshold = replace(
+        config,
+        filtering=replace(config.filtering, black_ratio_limit=0.59),
+    )
+    for changed in (changed_mapping, changed_color, changed_threshold):
+        assert pipeline_module._run_protocol_metadata(changed, None)["resume_protocol_sha256"] != base_hash
+
+    image = sitk.ReadImage(str(manual.path))
+    labels = sitk.GetArrayFromImage(image)
+    labels[0, 0, 0] = 8
+    changed_image = sitk.GetImageFromArray(labels)
+    changed_image.CopyInformation(image)
+    sitk.WriteImage(changed_image, str(manual.path))
+    assert pipeline_module._run_protocol_metadata(config, None)["resume_protocol_sha256"] != base_hash
+
+
+def test_manual_library_summary_counts_visible_labels_and_complete_features(
+    monkeypatch,
+    tmp_path,
+):
+    config, _ = _manual_fov_case(tmp_path)
+    case_directory = config.output_root / config.case_id
+    gallery = case_directory / "gallery"
+    for directory in (
+        "organ_vessel_boundary",
+        "eus_vessel_boundary",
+        "ct_eus_vessel_overlay",
+    ):
+        (gallery / directory).mkdir(parents=True, exist_ok=True)
+    records = []
+    for sample_id, labels, features in (
+        (
+            "first",
+            ["aorta", "inferior_vena_cava"],
+            [{"label": "aorta", "x_mm": 1.0, "y_mm": 2.0, "area_mm2": 3.0}],
+        ),
+        ("second", ["aorta"], []),
+    ):
+        for directory in (
+            "organ_vessel_boundary",
+            "eus_vessel_boundary",
+            "ct_eus_vessel_overlay",
+        ):
+            Image.new("RGB", (4, 4), "white").save(gallery / directory / f"{sample_id}.png")
+        records.append(
+            {
+                "slice_id": sample_id,
+                "status": "gallery",
+                "organ_metadata_schema_version": "eus-organ-metadata/v1",
+                "organ_vessel_boundary_png": f"organ_vessel_boundary/{sample_id}.png",
+                "organ_labels": [],
+                "eus_candidate_organ_labels": [],
+                "eus_vessel_metadata_schema_version": "eus-vessel-metadata/v1",
+                "eus_vessel_labels": labels,
+                "eus_vessel_features": features,
+                "eus_vessel_boundary_png": f"eus_vessel_boundary/{sample_id}.png",
+                "ct_eus_vessel_overlay_png": f"ct_eus_vessel_overlay/{sample_id}.png",
+            }
+        )
+    (gallery / "gallery.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [])
+    import ct_vascular_resampling.registration_adapter as registration_adapter
+
+    monkeypatch.setattr(
+        registration_adapter,
+        "load_gallery_database",
+        lambda *_args, **_kwargs: SimpleNamespace(features=[]),
+    )
+
+    run_case(config, steps=["index"])
+
+    summary = json.loads((case_directory / "library_summary.json").read_text(encoding="utf-8"))
+    assert summary["eus_vessel_label_counts"] == {
+        "aorta": 2,
+        "inferior_vena_cava": 1,
+    }
+    assert summary["eus_vessel_feature_counts"] == {"aorta": 1}
+    assert summary["eus_vessel_colors"] == {
+        "aorta": [255, 0, 0],
+        "inferior_vena_cava": [0, 0, 255],
+        "portal_vein": [170, 85, 255],
+    }
+    assert summary["eus_vessel_label_values"]["portal_vein"] == [26, 33, 34, 35, 36, 37]
 
 
 def test_manual_run_loads_labels_once_and_samples_same_square_batch_as_ct(monkeypatch, tmp_path):

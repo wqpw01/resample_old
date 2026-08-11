@@ -63,3 +63,23 @@ def test_quality_accepts_ct_without_black_region_or_artifact_line():
 
     assert result.accepted is True
     assert result.reason is None
+
+
+def test_quality_accepts_exactly_sixty_percent_black():
+    result = evaluate_ct_quality(
+        _pixels_with_black_ratio(0.60),
+        FilterConfig(black_ratio_limit=0.60, line_min_diagonal_fraction=1.0),
+    )
+
+    assert result.black_ratio == 0.60
+    assert result.black_ratio_exceeded is False
+
+
+def test_quality_rejects_more_than_sixty_percent_black():
+    result = evaluate_ct_quality(
+        _pixels_with_black_ratio(0.61),
+        FilterConfig(black_ratio_limit=0.60, line_min_diagonal_fraction=1.0),
+    )
+
+    assert result.black_ratio == 0.61
+    assert result.black_ratio_exceeded is True
