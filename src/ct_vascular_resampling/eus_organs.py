@@ -10,6 +10,9 @@ import json
 from typing import Iterable
 
 
+APPROVED_EUS_CATALOG_SHA256 = (
+    "54b8bf06fc48d1733e98b32a01dc10e056f5db3b4cddb34e18905dd8d97bf63d"
+)
 EUS_CATALOG_SCHEMA_VERSION = "eus-possible-organs/v1"
 EUS_ORGAN_METADATA_SCHEMA_VERSION = "eus-organ-metadata/v1"
 EXCLUDED_ORGAN_LABELS = frozenset({"bile_duct", "common_bile_duct"})
@@ -156,4 +159,10 @@ def parse_eus_organ_catalog(payload: bytes) -> EUSOrganCatalog:
 @cache
 def load_eus_organ_catalog() -> EUSOrganCatalog:
     payload = resources.files("ct_vascular_resampling").joinpath("data/eus_possible_organs.json").read_bytes()
-    return parse_eus_organ_catalog(payload)
+    catalog = parse_eus_organ_catalog(payload)
+    if catalog.sha256 != APPROVED_EUS_CATALOG_SHA256:
+        raise ValueError(
+            "EUS 器官白名单 SHA-256 与批准基准不一致: "
+            f"{catalog.sha256} != {APPROVED_EUS_CATALOG_SHA256}"
+        )
+    return catalog

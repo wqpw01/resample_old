@@ -42,7 +42,11 @@ from .eus_organs import (
     load_eus_organ_catalog,
 )
 from .fov_diagnostics import assess_rejected_fov
-from .gallery import GalleryWriter, write_rectangles_ply
+from .gallery import (
+    GalleryWriter,
+    validate_gallery_organ_metadata,
+    write_rectangles_ply,
+)
 from .geometry import frame_from_vertices, intersect_mesh_with_square, mesh_bounds_may_intersect_square
 from .mesh_io import load_surface_mesh
 from .quality import evaluate_ct_quality
@@ -288,13 +292,54 @@ class PreparedOrgan:
     bounds: np.ndarray
 
 
-def _load_prepared_organs(config: CaseConfig) -> list[PreparedOrgan]:
+MeshCache = dict[tuple[Path, str], trimesh.Trimesh]
+
+
+def _load_cached_mesh(
+    path: str | Path,
+    input_coordinate_system: str,
+    mesh_cache: MeshCache | None,
+) -> trimesh.Trimesh:
+    if mesh_cache is None:
+        return load_surface_mesh(path, input_coordinate_system=input_coordinate_system).mesh
+    key = (Path(path).resolve(), input_coordinate_system)
+    mesh = mesh_cache.get(key)
+    if mesh is None:
+        mesh = load_surface_mesh(path, input_coordinate_system=input_coordinate_system).mesh
+        mesh_cache[key] = mesh
+    return mesh
+
+
+def _load_prepared_vessels(
+    config: CaseConfig,
+    mesh_cache: MeshCache | None = None,
+) -> list[PreparedVessel]:
+    return [
+        PreparedVessel(
+            vessel.identifier,
+            vessel.label,
+            vessel.color,
+            _load_cached_mesh(
+                vessel.path,
+                config.geometry.input_coordinate_system,
+                mesh_cache,
+            ),
+        )
+        for vessel in config.vessel_models
+    ]
+
+
+def _load_prepared_organs(
+    config: CaseConfig,
+    mesh_cache: MeshCache | None = None,
+) -> list[PreparedOrgan]:
     organs: list[PreparedOrgan] = []
     for label, model_id in ORGAN_BOUNDARY_MODEL_IDS.items():
-        mesh = load_surface_mesh(
+        mesh = _load_cached_mesh(
             config.organ_models[model_id],
-            input_coordinate_system=config.geometry.input_coordinate_system,
-        ).mesh
+            config.geometry.input_coordinate_system,
+            mesh_cache,
+        )
         organs.append(
             PreparedOrgan(model_id, label, DEFAULT_ORGAN_COLORS[label], mesh, mesh.bounds.copy())
         )
@@ -467,6 +512,28 @@ def _write_json_atomic(destination: Path, value: dict) -> None:
 
 def _write_run_metadata(case_directory: Path, metadata: dict) -> None:
     _write_json_atomic(case_directory / "run_metadata.json", metadata)
+
+
+def _gallery_organ_label_counts(gallery_manifest: Path) -> tuple[Counter[str], Counter[str]]:
+    """严格校验 Gallery 器官 schema，并按切面累计通用与 EUS 候选标签。"""
+
+    organ_label_counts: Counter[str] = Counter()
+    eus_candidate_organ_label_counts: Counter[str] = Counter()
+    catalog = load_eus_organ_catalog()
+    with gallery_manifest.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                if record.get("status") != "gallery":
+                    raise ValueError("gallery.jsonl 记录状态必须为 gallery")
+                validate_gallery_organ_metadata(record, gallery_manifest.parent, catalog)
+            except (json.JSONDecodeError, AttributeError, ValueError) as error:
+                raise ValueError(f"gallery 清单第 {line_number} 行损坏: {error}") from error
+            organ_label_counts.update(record["organ_labels"])
+            eus_candidate_organ_label_counts.update(record["eus_candidate_organ_labels"])
+    return organ_label_counts, eus_candidate_organ_label_counts
 
 
 def _metadata_with_state(
@@ -747,16 +814,9 @@ def run_case(
             dicom_series_uid=config.dicom_series_uid,
             input_coordinate_system=config.geometry.input_coordinate_system,
         )
-        vessels = [
-            PreparedVessel(
-                vessel.identifier,
-                vessel.label,
-                vessel.color,
-                load_surface_mesh(vessel.path, input_coordinate_system=config.geometry.input_coordinate_system).mesh,
-            )
-            for vessel in config.vessel_models
-        ]
-        organs = _load_prepared_organs(config)
+        mesh_cache: MeshCache = {}
+        vessels = _load_prepared_vessels(config, mesh_cache)
+        organs = _load_prepared_organs(config, mesh_cache)
         effective_workers = workers if workers is not None else config.runtime.workers
         if effective_workers < 1:
             raise ValueError("workers 必须大于零")
@@ -914,18 +974,13 @@ def run_case(
         if gallery_manifest.is_file():
             from .registration_adapter import load_gallery_database
 
+            organ_label_counts, eus_candidate_organ_label_counts = _gallery_organ_label_counts(
+                gallery_manifest
+            )
             database = load_gallery_database(gallery_manifest, config.registration_module_path)
             indexed_feature_count = len(database.features)
             for feature in database.features:
                 label_counts.update(str(triplet.label) for triplet in feature.triplets)
-            with gallery_manifest.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if line.strip():
-                        record = json.loads(line)
-                        organ_label_counts.update(set(record.get("organ_labels", [])))
-                        eus_candidate_organ_label_counts.update(
-                            set(record.get("eus_candidate_organ_labels", []))
-                        )
         eus_catalog = load_eus_organ_catalog()
         _write_json_atomic(
             case_directory / "library_summary.json",

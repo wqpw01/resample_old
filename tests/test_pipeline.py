@@ -30,6 +30,50 @@ from ct_vascular_resampling.resampling_backend import CachedCpuBackend
 from ct_vascular_resampling.sampling_pipeline import SquareSample, SurfaceSamples
 
 
+def test_gallery_organ_summary_counts_slices_and_rejects_legacy_records(tmp_path):
+    gallery_directory = tmp_path / "gallery"
+    combined_directory = gallery_directory / "organ_vessel_boundary"
+    combined_directory.mkdir(parents=True)
+    for sample_id in ("first", "second"):
+        Image.new("RGB", (10, 10), "white").save(combined_directory / f"{sample_id}.png")
+    records = [
+        {
+            "slice_id": "first",
+            "status": "gallery",
+            "organ_metadata_schema_version": "eus-organ-metadata/v1",
+            "organ_vessel_boundary_png": "organ_vessel_boundary/first.png",
+            "organ_labels": ["liver", "stomach"],
+            "eus_candidate_organ_labels": ["liver"],
+        },
+        {
+            "slice_id": "second",
+            "status": "gallery",
+            "organ_metadata_schema_version": "eus-organ-metadata/v1",
+            "organ_vessel_boundary_png": "organ_vessel_boundary/second.png",
+            "organ_labels": ["liver"],
+            "eus_candidate_organ_labels": ["liver"],
+        },
+    ]
+    manifest = gallery_directory / "gallery.jsonl"
+    manifest.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    organ_counts, eus_counts = pipeline_module._gallery_organ_label_counts(manifest)
+
+    assert organ_counts == Counter({"liver": 2, "stomach": 1})
+    assert eus_counts == Counter({"liver": 2})
+
+    manifest.write_text(
+        json.dumps({"slice_id": "legacy", "status": "gallery", "organ_labels": ["liver"]})
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="旧版|schema"):
+        pipeline_module._gallery_organ_label_counts(manifest)
+
+
 def test_prepared_organs_use_canonical_labels_and_existing_model_paths(monkeypatch, tmp_path):
     mesh = trimesh.creation.box()
     organ_models = {
@@ -54,6 +98,39 @@ def test_prepared_organs_use_canonical_labels_and_existing_model_paths(monkeypat
     assert len(prepared) == 14
     assert by_label["portal_vein"].identifier == "portal_vein_and_splenic_vein"
     assert loaded_paths.count((organ_models["portal_vein_and_splenic_vein"], "LPS")) == 1
+
+
+def test_prepared_organ_and_vessel_layers_share_mesh_for_the_same_source(monkeypatch, tmp_path):
+    shared_path = tmp_path / "portal_vein_and_splenic_vein.ply"
+    organ_models = {
+        identifier: tmp_path / f"{identifier}.ply"
+        for identifier in pipeline_module.ORGAN_BOUNDARY_MODEL_IDS.values()
+    }
+    organ_models["portal_vein_and_splenic_vein"] = shared_path
+    loaded_paths = []
+
+    def load(path, *, input_coordinate_system):
+        loaded_paths.append((path, input_coordinate_system))
+        return SimpleNamespace(mesh=trimesh.creation.box())
+
+    monkeypatch.setattr(pipeline_module, "load_surface_mesh", load)
+    config = SimpleNamespace(
+        organ_models=organ_models,
+        vessel_models=(
+            VesselModel("portal_tree", shared_path, "portal", (255, 0, 255)),
+        ),
+        geometry=SimpleNamespace(input_coordinate_system="LPS"),
+    )
+    mesh_cache = {}
+
+    organs = pipeline_module._load_prepared_organs(config, mesh_cache)
+    vessels = pipeline_module._load_prepared_vessels(config, mesh_cache)
+
+    portal_organ = next(item for item in organs if item.label == "portal_vein")
+    assert loaded_paths.count((shared_path, "LPS")) == 1
+    assert portal_organ.mesh is vessels[0].mesh
+    assert portal_organ.label == "portal_vein"
+    assert vessels[0].label == "portal"
 
 
 def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):

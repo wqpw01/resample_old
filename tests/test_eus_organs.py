@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+import ct_vascular_resampling.eus_organs as eus_organs_module
 from ct_vascular_resampling.eus_organs import (
     EUS_CATALOG_SCHEMA_VERSION,
     EUS_ORGAN_METADATA_SCHEMA_VERSION,
@@ -78,6 +80,26 @@ def test_packaged_eus_catalog_matches_approved_source() -> None:
     assert catalog.to_record()["geometry_sources"] == {
         "portal_vein": "portal_vein_and_splenic_vein"
     }
+
+
+def test_packaged_loader_rejects_schema_valid_resource_with_unapproved_hash(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    approved_path = (
+        Path(eus_organs_module.__file__).parent / "data" / "eus_possible_organs.json"
+    )
+    replacement = tmp_path / "data" / "eus_possible_organs.json"
+    replacement.parent.mkdir()
+    replacement.write_bytes(approved_path.read_bytes() + b" \n")
+    monkeypatch.setattr(eus_organs_module.resources, "files", lambda _package: tmp_path)
+    load_eus_organ_catalog.cache_clear()
+
+    try:
+        with pytest.raises(ValueError, match="SHA-256|批准"):
+            load_eus_organ_catalog()
+    finally:
+        load_eus_organ_catalog.cache_clear()
 
 
 @pytest.mark.parametrize("forbidden", ["bile_duct", "common_bile_duct"])

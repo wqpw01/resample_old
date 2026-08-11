@@ -14,7 +14,11 @@ import numpy as np
 from PIL import Image
 
 from .config import ORGAN_BOUNDARY_IDS
-from .eus_organs import EUS_ORGAN_METADATA_SCHEMA_VERSION, load_eus_organ_catalog
+from .eus_organs import (
+    EUSOrganCatalog,
+    EUS_ORGAN_METADATA_SCHEMA_VERSION,
+    load_eus_organ_catalog,
+)
 from .geometry import SquareFrame
 from .quality import QualityResult
 from .rendering import RenderedSample
@@ -27,6 +31,45 @@ def _vector(value: np.ndarray) -> list[float]:
 def _record_digest(record: dict) -> bytes:
     canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).digest()
+
+
+def validate_gallery_organ_metadata(
+    record: dict,
+    gallery_directory: str | Path,
+    catalog: EUSOrganCatalog | None = None,
+) -> None:
+    """只读校验一条 Gallery 记录的器官元数据和组合图引用。"""
+
+    if not isinstance(record, dict):
+        raise ValueError("gallery 记录必须是 JSON 对象")
+    combined_path = record.get("organ_vessel_boundary_png")
+    organ_labels = record.get("organ_labels")
+    candidate_labels = record.get("eus_candidate_organ_labels")
+    if (
+        record.get("organ_metadata_schema_version") != EUS_ORGAN_METADATA_SCHEMA_VERSION
+        or not isinstance(combined_path, str)
+        or not isinstance(organ_labels, list)
+        or not isinstance(candidate_labels, list)
+    ):
+        raise ValueError(
+            "检测到旧版 gallery 记录，缺少当前器官元数据 schema、组合图或标签字段；"
+            "请使用新的输出目录"
+        )
+    if (
+        any(not isinstance(label, str) or label not in ORGAN_BOUNDARY_IDS for label in organ_labels)
+        or organ_labels != sorted(set(organ_labels))
+    ):
+        raise ValueError("gallery organ_labels 必须是 14 类器官中排序去重后的字符串列表")
+    expected_candidates = (catalog or load_eus_organ_catalog()).candidate_labels(organ_labels)
+    if (
+        any(not isinstance(label, str) for label in candidate_labels)
+        or candidate_labels != expected_candidates
+    ):
+        raise ValueError(
+            "gallery eus_candidate_organ_labels 必须严格等于 organ_labels 与 EUS 白名单的交集"
+        )
+    if not (Path(gallery_directory) / combined_path).is_file():
+        raise ValueError(f"gallery 组合图不存在: {combined_path}")
 
 
 def write_rectangles_ply(path: str | Path, frames: Iterable[SquareFrame]) -> None:
@@ -122,34 +165,11 @@ class GalleryWriter:
                 raise ValueError(f"位姿 {field} 必须为字符串列表")
 
     def _validate_gallery_record(self, record: dict) -> None:
-        combined_path = record.get("organ_vessel_boundary_png")
-        organ_labels = record.get("organ_labels")
-        candidate_labels = record.get("eus_candidate_organ_labels")
-        if (
-            record.get("organ_metadata_schema_version") != EUS_ORGAN_METADATA_SCHEMA_VERSION
-            or not isinstance(combined_path, str)
-            or not isinstance(organ_labels, list)
-            or not isinstance(candidate_labels, list)
-        ):
-            raise ValueError(
-                "检测到旧版 gallery 记录，缺少当前器官元数据 schema、组合图或标签字段；"
-                "请使用新的输出目录"
-            )
-        if (
-            any(not isinstance(label, str) or label not in ORGAN_BOUNDARY_IDS for label in organ_labels)
-            or organ_labels != sorted(set(organ_labels))
-        ):
-            raise ValueError("gallery organ_labels 必须是 14 类器官中排序去重后的字符串列表")
-        expected_candidates = self.eus_organ_catalog.candidate_labels(organ_labels)
-        if (
-            any(not isinstance(label, str) for label in candidate_labels)
-            or candidate_labels != expected_candidates
-        ):
-            raise ValueError(
-                "gallery eus_candidate_organ_labels 必须严格等于 organ_labels 与 EUS 白名单的交集"
-            )
-        if not (self.case_directory / "gallery" / combined_path).is_file():
-            raise ValueError(f"gallery 组合图不存在: {combined_path}")
+        validate_gallery_organ_metadata(
+            record,
+            self.case_directory / "gallery",
+            self.eus_organ_catalog,
+        )
 
     def _state_manifest_paths(self) -> dict[str, Path]:
         return {
