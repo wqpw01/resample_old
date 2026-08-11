@@ -744,6 +744,7 @@ class HMMPoseEstimator:
         for record in gallery_records
         for label in set(record["eus_candidate_organ_labels"])
     )
+    assert any(count > 1 for count in expected_eus_counts.values())
     assert library_summary["eus_candidate_organ_label_counts"] == dict(
         sorted(expected_eus_counts.items())
     )
