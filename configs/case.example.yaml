@@ -5,6 +5,8 @@ ct_path: "../data/case_001/ct.nrrd"
 output_root: "../output"
 registration_module_path: "/mnt/c/Users/zhangyutang/Desktop/CT-EUS定位项目/2021.py"
 
+# 14 类通用器官结构的模型来源。腹主动脉、下腔静脉、门静脉同时保留血管身份；
+# 门静脉器官轮廓复用 portal_vein_and_splenic_vein 组合模型。胆囊保留，胆管不配置。
 organ_models:
   adrenal_gland_left: "../data/case_001/models/adrenal_gland_left.obj"
   adrenal_gland_right: "../data/case_001/models/adrenal_gland_right.obj"
@@ -21,6 +23,7 @@ organ_models:
   spleen: "../data/case_001/models/spleen.obj"
   stomach: "../data/case_001/models/stomach.obj"
 
+# 双身份结构仍按原血管配置参与血管求交和特征提取，此处行为不受器官元数据影响。
 vessel_models:
   - id: "portal_tree"
     path: "../data/case_001/models/portal_vein_and_splenic_vein.obj"

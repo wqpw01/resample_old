@@ -45,7 +45,8 @@ ct_vascular_resampling/
 - `ct_resampling.py`、`resampling_backend.py`：按世界坐标对 CT 插值，提供参考 CPU 与经校验的可选 GPU 后端。
 - `rendering.py`：生成 CT 图、仅血管边界图、CT 血管叠加图和器官/血管组合边界图。
 - `quality.py`：按黑色区域占比和直线黑边筛选不合格图像。
-- `gallery.py`、`artifacts.py`：将样本写入 `gallery/`、`rejected/`、`unindexed/`，并生成 JSONL 清单和检索库摘要。
+- `gallery.py`、`artifacts.py`：将样本写入 `gallery/`、`rejected/`、`unindexed/`，生成 JSONL 清单，并为 Gallery 记录版本化的 EUS 候选器官元数据。
+- `eus_organs.py`、`data/eus_possible_organs.json`：校验随包发布的 EUS 器官白名单、双身份血管映射和白名单来源哈希。
 - `registration_adapter.py`：读取 `gallery.jsonl`，恢复 `2021.py` 可直接使用的检索对象。
 - `scripts/recover_interrupted_run_metadata.py`：在 SIGHUP 等信号中断且 `run_metadata.json` 缺失时，严格校验已有清单并重建恢复协议；不改写 PNG、PLY 或 JSONL。
 - `config.py`、`cli.py`、`pipeline.py`：配置解析、参数覆盖、日志和全流程调度。
@@ -53,11 +54,13 @@ ct_vascular_resampling/
 
 ### 重采样结果与检索入口
 
-一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态，`library_summary.json` 记录血管特征统计、器官标签计数和器官颜色图例。`run_metadata.json` 记录 RAS、核心设计哈希、构建 Git commit、输入文件 SHA-256、点距、中心线参数与人工端点选择证据、三轴角度、方形尺寸、输出分辨率、三次插值、WL/WW、FOV 填充值、质量/FOV 策略、实际后端和四状态计数。
+一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态。`library_summary.json` 记录血管特征统计、通用器官与 EUS 候选器官的逐切面计数、完整 EUS 标签映射和器官颜色图例。`run_metadata.json` 还记录 EUS 白名单 schema、SHA-256、规范标签、胆管排除项和门静脉几何来源，连同 RAS、核心设计哈希、构建 Git commit、输入文件 SHA-256、点距、中心线参数与人工端点选择证据、三轴角度、方形尺寸、输出分辨率、三次插值、WL/WW、FOV 填充值、质量/FOV 策略、实际后端和四状态计数共同形成可恢复运行协议。
 
-每个 gallery 帧继续生成 `ct/`、白底仅血管 `boundary_only/` 和 CT 血管叠加 `ct_overlay/`，并新增白底 `organ_vessel_boundary/`：11 类非血管器官先按固定颜色绘制，血管再按原配置颜色覆盖绘制。对应 JSONL 记录新增 `organ_vessel_boundary_png` 和排序去重的 `organ_labels`；器官标签不写入血管 `features`，因此不改变图库状态或 `2021.py` 的血管检索语义。`unindexed`、`rejected` 和 `excluded_fov` 不生成该图，也不写这两个字段。
+每个 gallery 帧继续生成 `ct/`、白底仅血管 `boundary_only/` 和 CT 血管叠加 `ct_overlay/`，并生成白底 `organ_vessel_boundary/`。组合图先绘制 14 类通用器官结构，再由原血管层按原配置颜色覆盖；其中腹主动脉、下腔静脉和门静脉具有“器官+血管”双重身份，但原血管求交、颜色、`features`、`boundary_only` 和 `ct_overlay` 均不改变。门静脉的器官轮廓复用现有 `portal_vein_and_splenic_vein` 组合网格，因此该规范标签表示该组合几何在切面内形成的正面积轮廓。
 
-断点恢复会检查四种状态的每条已完成记录、当前完整姿态 ID 集合、四顶点和位姿字段，并比较配置、输入 SHA-256、核心设计哈希和构建 Git commit 组成的运行协议。`run_metadata.json` 在首个待处理切面前原子写入 `run_state: running`，正常完成为 `complete`，普通异常为 `interrupted`。恢复仍会读取器官网格以重建姿态计划，并流式哈希输入；没有待处理姿态时不会把 CT 解码为体数据、不会加载血管渲染网格或初始化插值后端。旧图库或任何协议/几何不一致会明确报错，拒绝前不会改写既有 PLY。
+Gallery JSONL 中，`organ_labels` 是 14 类通用结构里在当前有限方形切面内形成正面积轮廓的排序去重标签；仅表面相切形成零面积点或线不会计入。`eus_candidate_organ_labels` 是 `organ_labels` 与随包白名单的严格交集，当前规范标签为左/右肾上腺、腹主动脉、十二指肠、下腔静脉、左/右肾、肝、胰、门静脉和脾。胃、食管和胆囊可保留在 `organ_labels`，但不进入 EUS 候选字段；`bile_duct` 与 `common_bile_duct` 显式禁止进入白名单，胆囊不等于胆管。该字段只提供建库元数据，不在本流程中执行检索初筛。器官标签始终不写入血管 `features`，因此不改变图库状态或 `2021.py` 的血管检索语义。`unindexed`、`rejected` 和 `excluded_fov` 不生成组合图，也不写上述器官字段。
+
+断点恢复会检查四种状态的每条已完成记录、当前完整姿态 ID 集合、四顶点和位姿字段，并比较配置、输入 SHA-256、核心设计哈希、EUS 白名单协议和构建 Git commit。`run_metadata.json` 在首个待处理切面前原子写入 `run_state: running`，正常完成为 `complete`，普通异常为 `interrupted`。恢复仍会读取器官网格以重建姿态计划，并流式哈希输入；没有待处理姿态时不会把 CT 解码为体数据、不会加载血管渲染网格或初始化插值后端。缺少新器官字段的旧 Gallery 不兼容本 schema，必须使用新的输出根目录重新建库；旧图库或任何协议/几何不一致都会明确报错，拒绝前不会改写既有 PLY。
 
 若进程因 `SIGHUP` 直接终止，且已有 JSONL 清单完整但缺少运行元数据，必须先执行受控重建：
 
@@ -74,6 +77,10 @@ python scripts/recover_interrupted_run_metadata.py \
 ### Interrupted-run recovery
 
 The pipeline writes an atomic `run_metadata.json` checkpoint before the first pending slice. A normal run ends with `run_state: complete`; an ordinary exception leaves `interrupted`. After a `SIGHUP` exit such as code 129, run `scripts/recover_interrupted_run_metadata.py` only after verifying the expected manifest count. The recovery command validates the complete pose plan, geometry, input hashes and design protocol, writes no PNG/PLY/JSONL, and records both the old completed build commits and the recovery implementation commit. Resume the job inside a detached `screen` session so an SSH disconnect cannot terminate the worker.
+
+### EUS organ metadata (English)
+
+Each Gallery record stores `organ_labels` for positive-area intersections with the 14 generic organ structures and `eus_candidate_organ_labels` for the exact intersection with the versioned EUS catalog. Aorta, inferior vena cava, and portal vein retain their original vessel behavior while also acting as organ labels; portal-vein organ geometry reuses the existing combined portal-and-splenic-vein mesh. Stomach, esophagus, and gallbladder remain generic labels but are outside the EUS candidate catalog. Bile duct and common bile duct are explicitly excluded. These fields are database metadata only and do not perform retrieval filtering or alter vessel features. `run_metadata.json` records the catalog fingerprint and geometry-source rule, while `library_summary.json` records the complete EUS label mapping and per-label slice counts. Pre-schema Gallery outputs must be rebuilt under a new output root.
 
 供 `2021.py` 检索时只加载 `gallery/gallery.jsonl`；`registration_adapter.load_gallery_database()` 会将其中的特征和方位转换为 `FeatureVector`、`VesselTriplet` 与 `ProbePose`，无需将 JSONL 转换为另一种文件格式。
 

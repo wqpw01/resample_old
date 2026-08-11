@@ -19,5 +19,7 @@ dicom_series_uid: null
 totalsegmentator:
   executable: TotalSegmentator
   device: gpu:0
+  # 自动流程要求 14 个通用结构：原 11 类器官加腹主动脉、下腔静脉、门静脉。
+  # 胆囊保留；胆管不进入器官元数据。门静脉使用 TotalSegmentator 的组合掩膜。
   # 可选；相对路径按本配置文件目录解析。缓存无效时会在此目录重新生成。
   # cache_directory: ../cache/case_001/totalsegmentator
