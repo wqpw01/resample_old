@@ -36,6 +36,11 @@ from .ct_resampling import (
     sample_ct_square,
     square_vertices_inside_ct,
 )
+from .eus_organs import (
+    EUS_ORGAN_GEOMETRY_SOURCES,
+    EXCLUDED_ORGAN_LABELS,
+    load_eus_organ_catalog,
+)
 from .fov_diagnostics import assess_rejected_fov
 from .gallery import GalleryWriter, write_rectangles_ply
 from .geometry import frame_from_vertices, intersect_mesh_with_square, mesh_bounds_may_intersect_square
@@ -152,6 +157,7 @@ def _run_protocol_metadata(
     duodenum_centerline_selection: dict[str, object] | None,
 ) -> dict[str, object]:
     endpoint_hints = config.sampling.duodenum_centerline_endpoint_hints_ras_mm
+    eus_catalog = load_eus_organ_catalog()
     protocol: dict[str, object] = {
         "coordinate_system": config.geometry.canonical_coordinate_system,
         "input_coordinate_system": config.geometry.input_coordinate_system,
@@ -209,6 +215,13 @@ def _run_protocol_metadata(
             "outside_status": "excluded_fov",
             "saved_artifacts": ["ct_png"],
             "out_of_bounds_png_value": 0,
+        },
+        "eus_possible_organs": {
+            "schema_version": eus_catalog.schema_version,
+            "sha256": eus_catalog.sha256,
+            "organ_labels": sorted(eus_catalog.labels),
+            "excluded_organ_labels": sorted(EXCLUDED_ORGAN_LABELS),
+            "geometry_sources": dict(EUS_ORGAN_GEOMETRY_SOURCES),
         },
     }
     canonical = json.dumps(protocol, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -897,6 +910,7 @@ def run_case(
         gallery_manifest = case_directory / "gallery" / "gallery.jsonl"
         label_counts: Counter[str] = Counter()
         organ_label_counts: Counter[str] = Counter()
+        eus_candidate_organ_label_counts: Counter[str] = Counter()
         if gallery_manifest.is_file():
             from .registration_adapter import load_gallery_database
 
@@ -907,7 +921,12 @@ def run_case(
             with gallery_manifest.open("r", encoding="utf-8") as handle:
                 for line in handle:
                     if line.strip():
-                        organ_label_counts.update(set(json.loads(line).get("organ_labels", [])))
+                        record = json.loads(line)
+                        organ_label_counts.update(set(record.get("organ_labels", [])))
+                        eus_candidate_organ_label_counts.update(
+                            set(record.get("eus_candidate_organ_labels", []))
+                        )
+        eus_catalog = load_eus_organ_catalog()
         _write_json_atomic(
             case_directory / "library_summary.json",
             {
@@ -917,6 +936,10 @@ def run_case(
                 "indexed_feature_count": indexed_feature_count,
                 "feature_label_counts": dict(sorted(label_counts.items())),
                 "organ_label_counts": dict(sorted(organ_label_counts.items())),
+                "eus_candidate_organ_label_counts": dict(
+                    sorted(eus_candidate_organ_label_counts.items())
+                ),
+                "eus_possible_organs": eus_catalog.to_record(),
                 "organ_boundary_colors": {
                     identifier: list(DEFAULT_ORGAN_COLORS[identifier]) for identifier in ORGAN_BOUNDARY_IDS
                 },

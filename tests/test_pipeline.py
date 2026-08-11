@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import json
 import numpy as np
 from PIL import Image
@@ -703,6 +704,25 @@ class HMMPoseEstimator:
         "saved_artifacts": ["ct_png"],
         "out_of_bounds_png_value": 0,
     }
+    assert metadata["eus_possible_organs"] == {
+        "schema_version": "eus-possible-organs/v1",
+        "sha256": "54b8bf06fc48d1733e98b32a01dc10e056f5db3b4cddb34e18905dd8d97bf63d",
+        "organ_labels": [
+            "adrenal_gland_left",
+            "adrenal_gland_right",
+            "aorta",
+            "duodenum",
+            "inferior_vena_cava",
+            "kidney_left",
+            "kidney_right",
+            "liver",
+            "pancreas",
+            "portal_vein",
+            "spleen",
+        ],
+        "excluded_organ_labels": ["bile_duct", "common_bile_duct"],
+        "geometry_sources": {"portal_vein": "portal_vein_and_splenic_vein"},
+    }
     assert metadata["completed_pose_count"] == 455
     assert metadata["status_counts"] == completed.status_counts
     assert cpu_batch_sizes == [8] * 56 + [7]
@@ -712,6 +732,27 @@ class HMMPoseEstimator:
     assert library_summary["gallery_manifest"] == "gallery/gallery.jsonl"
     assert set(library_summary["organ_boundary_colors"]) == set(pipeline_module.ORGAN_BOUNDARY_IDS)
     assert set(library_summary["organ_label_counts"]).issubset(set(pipeline_module.ORGAN_BOUNDARY_IDS))
+    gallery_records = [
+        json.loads(line)
+        for line in (tmp_path / "output" / "case_001" / "gallery" / "gallery.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    expected_eus_counts = Counter(
+        label
+        for record in gallery_records
+        for label in set(record["eus_candidate_organ_labels"])
+    )
+    assert library_summary["eus_candidate_organ_label_counts"] == dict(
+        sorted(expected_eus_counts.items())
+    )
+    assert library_summary["eus_possible_organs"] == {
+        "schema_version": "eus-possible-organs/v1",
+        "sha256": "54b8bf06fc48d1733e98b32a01dc10e056f5db3b4cddb34e18905dd8d97bf63d",
+        "organs": pipeline_module.load_eus_organ_catalog().to_record()["organs"],
+        "geometry_sources": {"portal_vein": "portal_vein_and_splenic_vein"},
+    }
 
     calls_after_first_run = list(cpu_batch_sizes)
     monkeypatch.setattr(
