@@ -36,6 +36,7 @@ ct_vascular_resampling/
 - `configs/auto_case.example.yaml`：只有 CT 与一份混合 NRRD/NIfTI 标签体时的模板。只需填写 artery、vein 的数值标签；旧配置可保留 portal，它会自动合并至 `vein_tree`。
 - `registration/2021.py`：兼容检索引擎，提供 `FeatureVector`、`VesselTriplet`、`ProbePose`、`MultiLabelledCBIR` 和 `HMMPoseEstimator`。
 - `scripts/preprocess_slicer_case.py`：从 DICOM CT 与 3D Slicer `.seg.nrrd` 提取对齐掩膜、导出 NRRD 与物理空间 PLY 网格，并生成可运行的内部病例 YAML。
+- `scripts/preprocess_manual_segmentation_case.py`：只从手工 `.seg.nrrd` 导出 14 类器官掩膜/网格，在病例配置中引用既有重建 `artery_tree.ply` 和 `vein_tree.ply`；不会从标签图重建或覆盖正式血管模型。
 
 ### 主程序模块
 
@@ -43,6 +44,7 @@ ct_vascular_resampling/
 - `preprocessing.py`：校验 Size、Spacing、Origin、Direction；提取二值掩膜，使用 Marching Cubes 导出物理空间网格，并写出预处理清单和内部病例配置。
 - `sampling.py`、`sampling_pipeline.py`、`centerline.py`、`squares.py`：目标器官射线筛选、区域内 10 mm 约束 FPS、十二指肠中心线、局部坐标和语义三轴姿态。
 - `ct_resampling.py`、`resampling_backend.py`：按世界坐标对 CT 插值，提供参考 CPU 与经校验的可选 GPU 后端。
+- `label_resampling.py`、`manual_segmentation.py`：使用与 CT 完全相同的世界坐标方形做最近邻标签采样，并从一个原始标签平面派生器官上下文和独立三类 EUS 血管结果。
 - `rendering.py`：生成 CT 图、仅血管边界图、CT 血管叠加图和器官/血管组合边界图。
 - `quality.py`：按黑色区域占比和直线黑边筛选不合格图像。
 - `gallery.py`、`artifacts.py`：将样本写入 `gallery/`、`rejected/`、`unindexed/`，生成 JSONL 清单，并为 Gallery 记录版本化的 EUS 候选器官元数据。
@@ -54,11 +56,17 @@ ct_vascular_resampling/
 
 ### 重采样结果与检索入口
 
-一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。默认仅在黑色像素比例超过 50% 时按比例拒绝；若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态。`library_summary.json` 记录血管特征统计、通用器官与 EUS 候选器官的逐切面计数、完整 EUS 标签映射和器官颜色图例。`run_metadata.json` 还记录 EUS 白名单 schema、SHA-256、规范标签、胆管排除项和门静脉几何来源，连同 RAS、核心设计哈希、构建 Git commit、输入文件 SHA-256、点距、中心线参数与人工端点选择证据、三轴角度、方形尺寸、输出分辨率、三次插值、WL/WW、FOV 填充值、质量/FOV 策略、实际后端和四状态计数共同形成可恢复运行协议。
+一个完整病例输出为 `<output_root>/<case_id>/`：`gallery/` 保存可检索图像与 `gallery.jsonl`，`unindexed/` 保存无血管截面但质量合格的图像，`rejected/` 保存黑色区域或直线黑边不合格图像。旧网格模式默认仅在黑色像素比例超过 50% 时按比例拒绝；本次正式手工标签病例配置固定为 `black_ratio_limit: 0.60`，只有严格大于 60% 才按比例拒绝，恰好 60% 保留。若同一张图同时满足黑色占比阈值与直线边界规则，`quality.reason` 固定为 `black_boundary_line`，并用 `quality.black_ratio_exceeded=true` 保留比例超限证据。`excluded_fov.jsonl` 单独记录任一方形顶点超出 CT 原始物理 FOV 的样本，包含方形世界坐标和连续体素索引诊断；对应灰度图写入 `excluded_fov/ct/<sample_id>.png`，超出 FOV 的像素强制为纯黑，不生成血管边界图或叠加图。`manifest.jsonl` 汇总上述四种状态。`library_summary.json` 记录血管特征统计、通用器官与 EUS 候选器官的逐切面计数、完整 EUS 标签映射和器官颜色图例。`run_metadata.json` 还记录 EUS 白名单 schema、SHA-256、规范标签、胆管排除项和门静脉几何来源，连同 RAS、核心设计哈希、构建 Git commit、输入文件 SHA-256、点距、中心线参数与人工端点选择证据、三轴角度、方形尺寸、输出分辨率、三次插值、WL/WW、FOV 填充值、质量/FOV 策略、实际后端和四状态计数共同形成可恢复运行协议。
 
 每个 gallery 帧继续生成 `ct/`、白底仅血管 `boundary_only/` 和 CT 血管叠加 `ct_overlay/`，并生成白底 `organ_vessel_boundary/`。组合图先绘制 14 类通用器官结构，再由原血管层按原配置颜色覆盖；其中腹主动脉、下腔静脉和门静脉具有“器官+血管”双重身份，但原血管求交、颜色、`features`、`boundary_only` 和 `ct_overlay` 均不改变。门静脉的器官轮廓复用现有 `portal_vein_and_splenic_vein` 组合网格，因此该规范标签表示该组合几何在切面内形成的正面积轮廓。
 
-Gallery JSONL 中，`organ_labels` 是 14 类通用结构里在当前有限方形切面内形成正面积轮廓的排序去重标签；仅表面相切形成零面积点或线不会计入。`eus_candidate_organ_labels` 是 `organ_labels` 与随包白名单的严格交集，当前规范标签为左/右肾上腺、腹主动脉、十二指肠、下腔静脉、左/右肾、肝、胰、门静脉和脾。胃、食管和胆囊可保留在 `organ_labels`，但不进入 EUS 候选字段；`bile_duct` 与 `common_bile_duct` 显式禁止进入白名单，胆囊不等于胆管。该字段只提供建库元数据，不在本流程中执行检索初筛。器官标签始终不写入血管 `features`，因此不改变图库状态或 `2021.py` 的血管检索语义。`unindexed`、`rejected` 和 `excluded_fov` 不生成组合图，也不写上述器官字段。
+Gallery JSONL 中，旧网格模式的 `organ_labels` 继续按网格正面积截面产生。启用 `manual_segmentation` 后，器官语义改为标签图最近邻采样结果：有限方形内只要至少有 1 个该器官像素就加入排序去重的 `organ_labels`，不要求闭合轮廓；整张方形位于器官内部时仍有标签，但不会假定方形外为背景，也不会沿图像四边画人为边框。`eus_candidate_organ_labels` 是 `organ_labels` 与随包白名单的严格交集。胃、食管和胆囊可保留在 `organ_labels`，但不进入 EUS 候选字段；`bile_duct` 与 `common_bile_duct` 显式禁止进入白名单，胆囊不等于胆管。该字段只提供建库元数据，不在本流程中执行检索初筛。器官标签始终不写入原血管 `features`，因此不改变图库状态或 `2021.py` 的原血管检索语义。`unindexed`、`rejected` 和 `excluded_fov` 不生成组合图，也不写上述器官字段。
+
+### 手工标签与独立 EUS 三类血管
+
+手工模式固定将 Ao `8` 归为 `aorta`（红色 `[255,0,0]`）、IVC `9` 归为 `inferior_vena_cava`（蓝色 `[0,0,255]`），并将 SMV/SV/Left PV/Right PV/PV confluence/PV branch `26,33,34,35,36,37` 合并为 `portal_vein`（紫色 `[170,85,255]`）。Main Portal Vein `23` 只进入器官门静脉联合，不进入新 EUS 血管门静脉；SMV `26` 同时属于二者。
+
+这条新链路不改变原重建 PLY 的 `features`、`boundary_only_png`、`ct_overlay_png` 或 gallery/unindexed/rejected 状态路由。每条原规则 Gallery 记录另外写入 `eus_vessel_labels`、`eus_vessel_features`、白底 `eus_vessel_boundary_png` 和 `ct_eus_vessel_overlay_png`。三类血管按 8 邻域分析；开放、截断或触及方形四边的不完整分量不进入 `eus_vessel_features`，但只要有可见标签像素，仍进入 `eus_vessel_labels`，并保留在两张新边界图中。新 EUS 特征不会把原本的 `unindexed` 切面提升为 Gallery。
 
 断点恢复会检查四种状态的每条已完成记录、当前完整姿态 ID 集合、四顶点和位姿字段，并比较配置、输入 SHA-256、核心设计哈希、EUS 白名单协议和构建 Git commit。`run_metadata.json` 在首个待处理切面前原子写入 `run_state: running`，正常完成为 `complete`，普通异常为 `interrupted`。恢复仍会读取器官网格以重建姿态计划，并流式哈希输入；没有待处理姿态时不会把 CT 解码为体数据、不会加载血管渲染网格或初始化插值后端。缺少新器官字段的旧 Gallery 不兼容本 schema，必须使用新的输出根目录重新建库；旧图库或任何协议/几何不一致都会明确报错，拒绝前不会改写既有 PLY。
 
@@ -80,7 +88,9 @@ The pipeline writes an atomic `run_metadata.json` checkpoint before the first pe
 
 ### EUS organ metadata (English)
 
-Each Gallery record stores `organ_labels` for positive-area intersections with the 14 generic organ structures and `eus_candidate_organ_labels` for the exact intersection with the versioned EUS catalog. Aorta, inferior vena cava, and portal vein retain their original vessel behavior while also acting as organ labels; portal-vein organ geometry reuses the existing combined portal-and-splenic-vein mesh. Stomach, esophagus, and gallbladder remain generic labels but are outside the EUS candidate catalog. Bile duct and common bile duct are explicitly excluded. These fields are database metadata only and do not perform retrieval filtering or alter vessel features. `run_metadata.json` records the catalog fingerprint and geometry-source rule, while `library_summary.json` records the complete EUS label mapping and per-label slice counts. Pre-schema Gallery outputs must be rebuilt under a new output root.
+In legacy mesh mode, Gallery organ labels continue to require positive-area mesh intersections. With `manual_segmentation` enabled, a nearest-neighbor label plane is sampled on exactly the same world-coordinate square as CT, and one sampled organ pixel is sufficient for `organ_labels`; contour closure is not required. A square fully inside an organ is labelled without drawing an artificial border around the image. The original reconstructed-PLY `features`, `boundary_only_png`, `ct_overlay_png`, and state routing remain unchanged.
+
+Manual mode also writes separate three-class EUS vessel metadata and images. Components that are open, clipped, or touch an image edge are excluded from `eus_vessel_features`, but their visible boundaries remain in both `eus_vessel_boundary_png` and `ct_eus_vessel_overlay_png`. Main Portal Vein label 23 belongs only to the organ union; SMV 26 and labels 33-37 form the EUS portal-vein class. The formal manual case rejects by black ratio only when it is strictly greater than 0.60. Pre-schema Gallery outputs must be rebuilt under a new output root.
 
 供 `2021.py` 检索时只加载 `gallery/gallery.jsonl`；`registration_adapter.load_gallery_database()` 会将其中的特征和方位转换为 `FeatureVector`、`VesselTriplet` 与 `ProbePose`，无需将 JSONL 转换为另一种文件格式。
 

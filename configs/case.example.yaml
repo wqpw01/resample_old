@@ -34,6 +34,37 @@ vessel_models:
     label: "hepatic"
     color: [0, 188, 212]
 
+# 可选：启用手工 3D Slicer 标签图模式。取消以下整段注释时，organ_models 仍用于
+# 采样点/零度面几何，原 vessel_models 仍独立产生原 features、boundary_only 和
+# ct_overlay；标签图只附加像素语义器官信息与三类 EUS 血管结果。
+# manual_segmentation:
+#   path: "../data/case_001/EUS-main-organ.seg.nrrd"
+#   organ_label_values:
+#     adrenal_gland_left: [13]
+#     adrenal_gland_right: [12]
+#     aorta: [8]
+#     duodenum: [14]
+#     esophagus: [5]
+#     gallbladder: [4]
+#     inferior_vena_cava: [9]
+#     kidney_left: [3]
+#     kidney_right: [2]
+#     liver: [6]
+#     pancreas: [11]
+#     portal_vein: [23, 26, 33, 34, 35, 36, 37]
+#     spleen: [1]
+#     stomach: [7]
+#   eus_vessel_label_values:
+#     aorta: [8]
+#     inferior_vena_cava: [9]
+#     portal_vein: [26, 33, 34, 35, 36, 37]
+#   eus_vessel_colors:
+#     aorta: [255, 0, 0]
+#     inferior_vena_cava: [0, 0, 255]
+#     portal_vein: [170, 85, 255]
+# Main Portal Vein 23 只属于器官门静脉联合，不属于 EUS 血管门静脉；
+# SMV 26 同时属于器官门静脉联合和 EUS 血管门静脉。
+
 sampling:
   point_counts:
     stomach: 1000
@@ -67,6 +98,8 @@ ct:
 
 filtering:
   black_threshold: 50
+  # 旧网格模式默认 0.50；本次正式手工标签模式必须改为 0.60。
+  # 两者均为严格大于阈值才按黑色比例拒绝。
   black_ratio_limit: 0.50
   line_min_diagonal_fraction: 0.70
   black_side_min_ratio: 0.90
