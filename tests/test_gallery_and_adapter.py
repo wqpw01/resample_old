@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 
 import numpy as np
@@ -53,7 +54,9 @@ def test_gallery_writer_routes_featured_sample_to_gallery_with_compatible_record
     assert record["features"][0]["label"] == "portal"
     assert record["ct_png"] == "ct/stomach-000001.png"
     assert record["organ_vessel_boundary_png"] == "organ_vessel_boundary/stomach-000001.png"
+    assert record["organ_metadata_schema_version"] == "eus-organ-metadata/v1"
     assert record["organ_labels"] == ["liver"]
+    assert record["eus_candidate_organ_labels"] == ["liver"]
     assert record["pixel_spacing_mm"] == [10.0 / 19.0, 10.0 / 19.0]
     assert writer.completed_status("stomach-000001") == "gallery"
 
@@ -69,6 +72,8 @@ def test_gallery_writer_routes_empty_and_rejected_samples_to_separate_directorie
         record = json.loads((tmp_path / "case_001" / status / f"{status}.jsonl").read_text(encoding="utf-8"))
         assert "organ_vessel_boundary_png" not in record
         assert "organ_labels" not in record
+        assert "organ_metadata_schema_version" not in record
+        assert "eus_candidate_organ_labels" not in record
         assert not (tmp_path / "case_001" / status / "organ_vessel_boundary" / f"{sample_id}.png").exists()
 
 
@@ -101,6 +106,8 @@ def test_gallery_writer_persists_fov_exclusion_with_ct_only(tmp_path):
     assert "ct_overlay_png" not in record
     assert "organ_vessel_boundary_png" not in record
     assert "organ_labels" not in record
+    assert "organ_metadata_schema_version" not in record
+    assert "eus_candidate_organ_labels" not in record
     with Image.open(ct_path) as saved:
         assert saved.mode == "L"
         assert np.all(np.asarray(saved) == 91)
@@ -197,7 +204,7 @@ def test_gallery_writer_repairs_root_record_when_state_manifest_append_was_inter
     [
         pytest.param(["liver", "liver"], id="duplicate"),
         pytest.param(["stomach", "liver"], id="unsorted"),
-        pytest.param(["aorta"], id="unsupported"),
+        pytest.param(["bile_duct"], id="unsupported"),
         pytest.param([1], id="non-string"),
     ],
 )
@@ -209,8 +216,10 @@ def test_gallery_writer_rejects_invalid_organ_labels_on_resume(tmp_path, organ_l
     record = {
         "slice_id": "sample",
         "status": "gallery",
+        "organ_metadata_schema_version": "eus-organ-metadata/v1",
         "organ_vessel_boundary_png": "organ_vessel_boundary/sample.png",
         "organ_labels": organ_labels,
+        "eus_candidate_organ_labels": ["liver"] if "liver" in organ_labels else [],
     }
     serialized = json.dumps(record) + "\n"
     (case_directory / "manifest.jsonl").write_text(serialized, encoding="utf-8")
@@ -218,6 +227,77 @@ def test_gallery_writer_rejects_invalid_organ_labels_on_resume(tmp_path, organ_l
 
     with pytest.raises(ValueError, match="organ_labels"):
         GalleryWriter(case_directory, case_id="case_001")
+
+
+@pytest.mark.parametrize(
+    ("organ_labels", "candidate_labels"),
+    [
+        pytest.param(["liver"], ["liver", "liver"], id="duplicate"),
+        pytest.param(["aorta", "liver"], ["liver", "aorta"], id="unsorted"),
+        pytest.param(["stomach"], ["stomach"], id="not-in-whitelist"),
+        pytest.param(["liver"], ["aorta"], id="not-visible"),
+        pytest.param(["liver"], [1], id="non-string"),
+    ],
+)
+def test_gallery_writer_rejects_invalid_eus_candidate_labels_on_resume(
+    tmp_path,
+    organ_labels,
+    candidate_labels,
+):
+    case_directory = tmp_path / "case_001"
+    combined_path = case_directory / "gallery" / "organ_vessel_boundary" / "sample.png"
+    combined_path.parent.mkdir(parents=True)
+    Image.new("RGB", (20, 20), "white").save(combined_path)
+    record = {
+        "slice_id": "sample",
+        "status": "gallery",
+        "organ_metadata_schema_version": "eus-organ-metadata/v1",
+        "organ_vessel_boundary_png": "organ_vessel_boundary/sample.png",
+        "organ_labels": organ_labels,
+        "eus_candidate_organ_labels": candidate_labels,
+    }
+    serialized = json.dumps(record) + "\n"
+    (case_directory / "manifest.jsonl").write_text(serialized, encoding="utf-8")
+    (case_directory / "gallery" / "gallery.jsonl").write_text(serialized, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="eus_candidate_organ_labels"):
+        GalleryWriter(case_directory, case_id="case_001")
+
+
+@pytest.mark.parametrize(
+    ("organ_labels", "expected_candidates"),
+    [
+        pytest.param(["gallbladder", "stomach"], [], id="generic-only"),
+        pytest.param(
+            ["aorta", "inferior_vena_cava", "portal_vein"],
+            ["aorta", "inferior_vena_cava", "portal_vein"],
+            id="dual-role-vessels",
+        ),
+    ],
+)
+def test_gallery_writer_derives_eus_candidates_from_visible_organs(
+    tmp_path,
+    organ_labels,
+    expected_candidates,
+):
+    writer = GalleryWriter(tmp_path / "case_001", case_id="case_001")
+    rendered = replace(_rendered(), organ_labels=organ_labels)
+
+    writer.write_sample(
+        "sample",
+        "stomach",
+        np.zeros(3),
+        np.array([0.0, 0.0, 1.0]),
+        _frame(),
+        rendered,
+        QualityResult(True, None, 0.0),
+    )
+
+    record = json.loads(
+        (tmp_path / "case_001" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8")
+    )
+    assert record["organ_labels"] == organ_labels
+    assert record["eus_candidate_organ_labels"] == expected_candidates
 
 
 def test_gallery_writer_rejects_state_record_missing_from_root_manifest(tmp_path):

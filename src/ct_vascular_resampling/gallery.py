@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from .config import ORGAN_BOUNDARY_IDS
+from .eus_organs import EUS_ORGAN_METADATA_SCHEMA_VERSION, load_eus_organ_catalog
 from .geometry import SquareFrame
 from .quality import QualityResult
 from .rendering import RenderedSample
@@ -72,6 +73,7 @@ class GalleryWriter:
         self.case_id = case_id
         self.required_core_design_sha256 = required_core_design_sha256
         self.repair_missing_state_records = repair_missing_state_records
+        self.eus_organ_catalog = load_eus_organ_catalog()
         self.manifest_path = self.case_directory / "manifest.jsonl"
         self.case_directory.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
@@ -122,15 +124,30 @@ class GalleryWriter:
     def _validate_gallery_record(self, record: dict) -> None:
         combined_path = record.get("organ_vessel_boundary_png")
         organ_labels = record.get("organ_labels")
-        if not isinstance(combined_path, str) or not isinstance(organ_labels, list):
+        candidate_labels = record.get("eus_candidate_organ_labels")
+        if (
+            record.get("organ_metadata_schema_version") != EUS_ORGAN_METADATA_SCHEMA_VERSION
+            or not isinstance(combined_path, str)
+            or not isinstance(organ_labels, list)
+            or not isinstance(candidate_labels, list)
+        ):
             raise ValueError(
-                "检测到旧版 gallery 记录，缺少 organ_vessel_boundary_png 或 organ_labels；请使用新的输出目录"
+                "检测到旧版 gallery 记录，缺少当前器官元数据 schema、组合图或标签字段；"
+                "请使用新的输出目录"
             )
         if (
             any(not isinstance(label, str) or label not in ORGAN_BOUNDARY_IDS for label in organ_labels)
             or organ_labels != sorted(set(organ_labels))
         ):
-            raise ValueError("gallery organ_labels 必须是 11 类器官中排序去重后的字符串列表")
+            raise ValueError("gallery organ_labels 必须是 14 类器官中排序去重后的字符串列表")
+        expected_candidates = self.eus_organ_catalog.candidate_labels(organ_labels)
+        if (
+            any(not isinstance(label, str) for label in candidate_labels)
+            or candidate_labels != expected_candidates
+        ):
+            raise ValueError(
+                "gallery eus_candidate_organ_labels 必须严格等于 organ_labels 与 EUS 白名单的交集"
+            )
         if not (self.case_directory / "gallery" / combined_path).is_file():
             raise ValueError(f"gallery 组合图不存在: {combined_path}")
 
@@ -399,14 +416,20 @@ class GalleryWriter:
             },
         }
         if status == "gallery":
+            record["organ_metadata_schema_version"] = EUS_ORGAN_METADATA_SCHEMA_VERSION
             record["organ_vessel_boundary_png"] = str(combined_path.relative_to(root))
             record["organ_labels"] = rendered.organ_labels
+            record["eus_candidate_organ_labels"] = self.eus_organ_catalog.candidate_labels(
+                rendered.organ_labels
+            )
         if resampling_backend is not None:
             record["resampling_backend"] = resampling_backend
         if fov_diagnostics is not None:
             record["fov_diagnostics"] = fov_diagnostics
         if pose_metadata:
             record.update(pose_metadata)
+        if status == "gallery":
+            self._validate_gallery_record(record)
         self._append_jsonl(self.manifest_path, record)
         record_path = root / ({"gallery": "gallery.jsonl", "unindexed": "unindexed.jsonl", "rejected": "rejected.jsonl"}[status])
         self._append_jsonl(record_path, record)
