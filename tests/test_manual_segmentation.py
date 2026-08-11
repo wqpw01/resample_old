@@ -6,7 +6,12 @@ import numpy as np
 import pytest
 
 from ct_vascular_resampling.config import ManualSegmentationConfig
-from ct_vascular_resampling.manual_segmentation import analyze_manual_label_plane
+from ct_vascular_resampling.geometry import SectionContour
+from ct_vascular_resampling.manual_segmentation import (
+    analyze_manual_label_plane,
+    apply_manual_label_analysis,
+)
+from ct_vascular_resampling.rendering import VesselLayer, render_sample_images
 
 
 CONFIG = ManualSegmentationConfig(
@@ -126,6 +131,46 @@ def test_eus_features_use_eight_connectivity_and_square_local_millimetres():
             "area_mm2": 400.0,
         }
     ]
+
+
+def test_manual_rendering_adds_unfiltered_eus_images_without_changing_original_vessels():
+    contour = SectionContour(
+        points_mm=np.asarray([[2.0, 2.0], [8.0, 2.0], [8.0, 8.0], [2.0, 8.0]]),
+        complete=True,
+        centroid_mm=np.asarray([5.0, 5.0]),
+        area_mm2=36.0,
+    )
+    baseline = render_sample_images(
+        np.full((12, 12), 127, dtype=np.uint8),
+        11.0,
+        11.0,
+        [VesselLayer("artery_tree", "artery", (255, 82, 0), [contour])],
+    )
+    labels = np.zeros((12, 12), dtype=np.uint8)
+    labels[4:7, 4:7] = 8
+    labels[0:3, 8:11] = 9
+    analysis = analyze_manual_label_plane(labels, 11.0, 11.0, CONFIG)
+
+    manual = apply_manual_label_analysis(baseline, analysis)
+
+    assert manual.features == baseline.features
+    assert manual.boundary_only.tobytes() == baseline.boundary_only.tobytes()
+    assert manual.ct_overlay.tobytes() == baseline.ct_overlay.tobytes()
+    assert manual.organ_labels == ["aorta", "inferior_vena_cava"]
+    assert [feature["label"] for feature in manual.eus_vessel_features] == ["aorta"]
+    assert manual.eus_vessel_labels == ["aorta", "inferior_vena_cava"]
+    assert manual.eus_vessel_boundary is not None
+    assert manual.ct_eus_vessel_overlay is not None
+    boundary_colors = set(manual.eus_vessel_boundary.getdata())
+    overlay_colors = set(manual.ct_eus_vessel_overlay.getdata())
+    assert (255, 0, 0) in boundary_colors
+    assert (0, 0, 255) in boundary_colors
+    assert (255, 0, 0) in overlay_colors
+    assert (0, 0, 255) in overlay_colors
+    assert manual.eus_vessel_boundary.getpixel((5, 5)) == (255, 255, 255)
+    assert manual.eus_vessel_boundary.getpixel((9, 1)) == (255, 255, 255)
+    assert manual.ct_eus_vessel_overlay.getpixel((5, 5)) == (127, 127, 127)
+    assert manual.ct_eus_vessel_overlay.getpixel((9, 1)) == (127, 127, 127)
 
 
 @pytest.mark.parametrize(

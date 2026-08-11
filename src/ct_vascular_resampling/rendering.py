@@ -35,6 +35,10 @@ class RenderedSample:
     organ_vessel_boundary: Image.Image
     features: list[dict[str, float | str]]
     organ_labels: list[str]
+    eus_vessel_boundary: Image.Image | None = None
+    ct_eus_vessel_overlay: Image.Image | None = None
+    eus_vessel_features: list[dict[str, float | str]] | None = None
+    eus_vessel_labels: list[str] | None = None
 
 
 def _to_pixels(points_mm: np.ndarray, width_mm: float, length_mm: float, size: tuple[int, int]) -> list[tuple[int, int]]:

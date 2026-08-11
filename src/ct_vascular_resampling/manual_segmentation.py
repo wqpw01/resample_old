@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
+from PIL import Image
 from scipy import ndimage
 
 from .config import (
@@ -13,6 +14,7 @@ from .config import (
     ORGAN_BOUNDARY_IDS,
     ManualSegmentationConfig,
 )
+from .rendering import RenderedSample
 
 
 EUS_VESSEL_METADATA_SCHEMA_VERSION = "eus-vessel-metadata/v1"
@@ -111,4 +113,38 @@ def analyze_manual_label_plane(
         eus_vessel_labels=sorted(eus_labels),
         eus_vessel_features=eus_features,
         eus_vessel_boundary_rgb=eus_boundary,
+    )
+
+
+def apply_manual_label_analysis(
+    rendered: RenderedSample,
+    analysis: ManualLabelPlaneAnalysis,
+) -> RenderedSample:
+    """附加手工标签图像，同时保持原血管图像和特征不变。"""
+
+    size = rendered.ct.size
+    expected_shape = (size[1], size[0], 3)
+    if analysis.organ_boundary_rgb.shape != expected_shape:
+        raise ValueError("器官边界图尺寸与 CT 不一致")
+    if analysis.eus_vessel_boundary_rgb.shape != expected_shape:
+        raise ValueError("EUS 血管边界图尺寸与 CT 不一致")
+
+    original_vessels = np.asarray(rendered.boundary_only.convert("RGB"), dtype=np.uint8)
+    combined = np.asarray(analysis.organ_boundary_rgb, dtype=np.uint8).copy()
+    original_vessel_mask = np.any(original_vessels != 255, axis=2)
+    combined[original_vessel_mask] = original_vessels[original_vessel_mask]
+
+    eus_boundary = np.asarray(analysis.eus_vessel_boundary_rgb, dtype=np.uint8)
+    eus_mask = np.any(eus_boundary != 255, axis=2)
+    ct_eus_overlay = np.asarray(rendered.ct.convert("RGB"), dtype=np.uint8).copy()
+    ct_eus_overlay[eus_mask] = eus_boundary[eus_mask]
+
+    return replace(
+        rendered,
+        organ_vessel_boundary=Image.fromarray(combined, mode="RGB"),
+        organ_labels=list(analysis.organ_labels),
+        eus_vessel_boundary=Image.fromarray(eus_boundary, mode="RGB"),
+        ct_eus_vessel_overlay=Image.fromarray(ct_eus_overlay, mode="RGB"),
+        eus_vessel_features=list(analysis.eus_vessel_features),
+        eus_vessel_labels=list(analysis.eus_vessel_labels),
     )
