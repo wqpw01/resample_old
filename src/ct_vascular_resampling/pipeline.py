@@ -27,6 +27,7 @@ from .config import (
     CTConfig,
     CaseConfig,
     FilterConfig,
+    ManualSegmentationConfig,
 )
 from .ct_resampling import (
     CTVolume,
@@ -48,6 +49,15 @@ from .gallery import (
     write_rectangles_ply,
 )
 from .geometry import frame_from_vertices, intersect_mesh_with_square, mesh_bounds_may_intersect_square
+from .label_resampling import (
+    CpuLabelBackend,
+    LabelSamplingBackend,
+    create_label_sampling_backend,
+    load_label_volume,
+    validate_label_backend_against_cpu,
+    validate_label_geometry,
+)
+from .manual_segmentation import analyze_manual_label_plane, apply_manual_label_analysis
 from .mesh_io import load_surface_mesh
 from .quality import evaluate_ct_quality
 from .resampling_backend import CachedCpuBackend, create_sampling_backend, validate_backend_against_cpu
@@ -431,6 +441,8 @@ def render_precomputed_square(
     organs: Iterable[PreparedOrgan] = (),
     resampling_backend: str | None = None,
     volume: CTVolume | None = None,
+    label_plane: np.ndarray | None = None,
+    manual_segmentation: ManualSegmentationConfig | None = None,
 ) -> str:
     """以已重采样的 HU 方形生成 CT、边界、特征和最终图库状态。"""
 
@@ -471,7 +483,7 @@ def render_precomputed_square(
     )
     has_complete_vessel = any(contour.complete for layer in vessel_layers for contour in layer.contours)
     organ_layers = []
-    if has_complete_vessel:
+    if has_complete_vessel and manual_segmentation is None:
         organ_layers = [
             OrganLayer(
                 organ.identifier,
@@ -489,6 +501,16 @@ def render_precomputed_square(
         vessel_layers,
         organ_layers=organ_layers,
     )
+    if has_complete_vessel and manual_segmentation is not None:
+        if label_plane is None:
+            raise ValueError("手工分割 Gallery 样本缺少标签平面")
+        analysis = analyze_manual_label_plane(
+            label_plane,
+            frame.width_mm,
+            frame.length_mm,
+            manual_segmentation,
+        )
+        rendered = apply_manual_label_analysis(rendered, analysis)
     return writer.write_sample(
         sample_id=sample.sample_id,
         organ=sample.organ,
@@ -570,6 +592,8 @@ def _preflight(config: CaseConfig) -> None:
     for vessel in config.vessel_models:
         if not vessel.path.is_file():
             raise FileNotFoundError(f"血管模型不存在 ({vessel.identifier}): {vessel.path}")
+    if config.manual_segmentation is not None and not config.manual_segmentation.path.is_file():
+        raise FileNotFoundError(f"手工分割标签文件不存在: {config.manual_segmentation.path}")
 
 
 def _legacy_name(organ: str) -> str:
@@ -641,6 +665,7 @@ def recover_interrupted_run_metadata(
         config.case_id,
         required_core_design_sha256=CORE_DESIGN_SHA256,
         repair_missing_state_records=False,
+        manual_segmentation_enabled=config.manual_segmentation is not None,
     )
     statuses = Counter(writer.completed_statuses.values())
     if sum(statuses.values()) != expected_completed_count:
@@ -743,6 +768,7 @@ def run_case(
             case_directory,
             config.case_id,
             required_core_design_sha256=CORE_DESIGN_SHA256,
+            manual_segmentation_enabled=config.manual_segmentation is not None,
         )
         if writer.completed_statuses:
             metadata_path = case_directory / "run_metadata.json"
@@ -814,9 +840,20 @@ def run_case(
             dicom_series_uid=config.dicom_series_uid,
             input_coordinate_system=config.geometry.input_coordinate_system,
         )
+        label_volume = None
+        if config.manual_segmentation is not None:
+            label_volume = load_label_volume(
+                config.manual_segmentation.path,
+                input_coordinate_system=config.geometry.input_coordinate_system,
+            )
+            validate_label_geometry(volume, label_volume)
         mesh_cache: MeshCache = {}
         vessels = _load_prepared_vessels(config, mesh_cache)
-        organs = _load_prepared_organs(config, mesh_cache)
+        organs = (
+            []
+            if config.manual_segmentation is not None
+            else _load_prepared_organs(config, mesh_cache)
+        )
         effective_workers = workers if workers is not None else config.runtime.workers
         if effective_workers < 1:
             raise ValueError("workers 必须大于零")
@@ -868,6 +905,55 @@ def run_case(
                 backend_metadata["fallback_reason"] = message
             else:
                 reference_backend.close()
+
+        label_backend: LabelSamplingBackend | None = None
+        label_metadata: dict[str, object] | None = None
+        if label_volume is not None:
+            try:
+                label_backend, label_metadata = create_label_sampling_backend(
+                    label_volume,
+                    backend=config.runtime.backend,
+                    gpu_device=config.runtime.gpu_device,
+                    gpu_batch_size=config.runtime.gpu_batch_size,
+                )
+            except Exception:
+                backend.close()
+                raise
+            label_metadata["calibration"] = None
+            if label_backend.name != "cpu" and calibration_samples:
+                reference_label_backend = CpuLabelBackend(label_volume)
+                try:
+                    label_calibration = validate_label_backend_against_cpu(
+                        label_backend,
+                        reference_label_backend,
+                        np.asarray(
+                            [sample.vertices for sample in calibration_samples],
+                            dtype=np.float64,
+                        ),
+                        resolution=config.ct.output_resolution,
+                    )
+                except Exception as error:
+                    label_calibration = {
+                        "sample_count": len(calibration_samples),
+                        "accepted": False,
+                        "error": str(error),
+                    }
+                label_metadata["calibration"] = label_calibration
+                if not label_calibration["accepted"]:
+                    message = f"GPU 标签后端未通过 CPU 对照校验: {label_calibration}"
+                    if config.runtime.backend == "gpu":
+                        label_backend.close()
+                        reference_label_backend.close()
+                        backend.close()
+                        raise ValueError(message)
+                    label_backend.close()
+                    label_backend = reference_label_backend
+                    label_metadata["selected_backend"] = "cpu"
+                    label_metadata["fallback_reason"] = message
+                else:
+                    reference_label_backend.close()
+            label_metadata["selected_backend"] = label_backend.name
+            backend_metadata["label_sampling"] = label_metadata
         backend_metadata["selected_backend"] = backend.name
         _write_run_metadata(
             case_directory,
@@ -879,8 +965,10 @@ def run_case(
             ),
         )
 
-        def render_one(item: tuple[SquareSample, np.ndarray, str]) -> str:
-            sample, hu, backend_name = item
+        def render_one(
+            item: tuple[SquareSample, np.ndarray, np.ndarray | None, str],
+        ) -> str:
+            sample, hu, label_plane, backend_name = item
             return render_precomputed_square(
                 sample,
                 hu,
@@ -891,12 +979,37 @@ def run_case(
                 organs=organs,
                 resampling_backend=backend_name,
                 volume=volume,
+                label_plane=label_plane,
+                manual_segmentation=config.manual_segmentation,
             )
 
         def pending_samples() -> Iterable[SquareSample]:
             for sample in samples:
                 if writer.completed_status(sample.sample_id) is None:
                     yield sample
+
+        def sample_label_batch(vertices_batch: np.ndarray) -> np.ndarray | list[None]:
+            nonlocal label_backend
+            if label_backend is None:
+                return [None] * len(vertices_batch)
+            try:
+                return label_backend.sample_many(
+                    vertices_batch,
+                    config.ct.output_resolution,
+                )
+            except Exception as error:
+                if config.runtime.backend != "auto" or label_backend.name == "cpu":
+                    raise
+                label_backend.close()
+                assert label_volume is not None
+                assert label_metadata is not None
+                label_backend = CpuLabelBackend(label_volume)
+                label_metadata["selected_backend"] = "cpu"
+                label_metadata["fallback_reason"] = f"GPU 标签运行失败: {error}"
+                return label_backend.sample_many(
+                    vertices_batch,
+                    config.ct.output_resolution,
+                )
 
         try:
             if effective_workers == 1:
@@ -907,12 +1020,25 @@ def run_case(
                 if backend.name == "cpu":
                     cpu_batch_size = effective_workers * 4
                     for batch in _batched(pending_samples(), cpu_batch_size):
+                        vertices_batch = np.asarray(
+                            [sample.vertices for sample in batch],
+                            dtype=np.float64,
+                        )
                         hu_batch = backend.sample_many(
-                            np.asarray([sample.vertices for sample in batch], dtype=np.float64),
+                            vertices_batch,
                             config.ct.output_resolution,
                             config.ct.fill_hu_value,
                         )
-                        items = [(sample, hu, backend.name) for sample, hu in zip(batch, hu_batch, strict=True)]
+                        label_batch = sample_label_batch(vertices_batch)
+                        items = [
+                            (sample, hu, label_plane, backend.name)
+                            for sample, hu, label_plane in zip(
+                                batch,
+                                hu_batch,
+                                label_batch,
+                                strict=True,
+                            )
+                        ]
                         if executor is None:
                             statuses.update(render_one(item) for item in items)
                         else:
@@ -920,9 +1046,13 @@ def run_case(
                 else:
                     batch_size = config.runtime.gpu_batch_size
                     for batch in _batched(pending_samples(), batch_size):
+                        vertices_batch = np.asarray(
+                            [sample.vertices for sample in batch],
+                            dtype=np.float64,
+                        )
                         try:
                             hu_batch = backend.sample_many(
-                                np.asarray([sample.vertices for sample in batch], dtype=np.float64),
+                                vertices_batch,
                                 config.ct.output_resolution,
                                 config.ct.fill_hu_value,
                             )
@@ -934,11 +1064,20 @@ def run_case(
                             backend_metadata["selected_backend"] = "cpu"
                             backend_metadata["fallback_reason"] = f"GPU 运行失败: {error}"
                             hu_batch = backend.sample_many(
-                                np.asarray([sample.vertices for sample in batch], dtype=np.float64),
+                                vertices_batch,
                                 config.ct.output_resolution,
                                 config.ct.fill_hu_value,
                             )
-                        items = [(sample, hu, backend.name) for sample, hu in zip(batch, hu_batch, strict=True)]
+                        label_batch = sample_label_batch(vertices_batch)
+                        items = [
+                            (sample, hu, label_plane, backend.name)
+                            for sample, hu, label_plane in zip(
+                                batch,
+                                hu_batch,
+                                label_batch,
+                                strict=True,
+                            )
+                        ]
                         if executor is None:
                             statuses.update(render_one(item) for item in items)
                         else:
@@ -948,19 +1087,27 @@ def run_case(
                     executor.shutdown(wait=True)
         finally:
             backend_metadata["selected_backend"] = backend.name
+            if label_backend is not None:
+                assert label_metadata is not None
+                label_metadata["selected_backend"] = label_backend.name
+                backend_metadata["label_sampling"] = label_metadata
             backend_metadata["excluded_fov_count"] = statuses["excluded_fov"]
             backend_metadata["completed_pose_count"] = sum(statuses.values())
             backend_metadata["status_counts"] = dict(sorted(statuses.items()))
-            _write_run_metadata(
-                case_directory,
-                _metadata_with_state(
-                    backend_metadata,
-                    state="complete" if sum(statuses.values()) == len(samples) else "interrupted",
-                    statuses=statuses,
-                    total_squares=len(samples),
-                ),
-            )
-            backend.close()
+            try:
+                _write_run_metadata(
+                    case_directory,
+                    _metadata_with_state(
+                        backend_metadata,
+                        state="complete" if sum(statuses.values()) == len(samples) else "interrupted",
+                        statuses=statuses,
+                        total_squares=len(samples),
+                    ),
+                )
+            finally:
+                backend.close()
+                if label_backend is not None:
+                    label_backend.close()
         if sum(statuses.values()) != len(samples):
             raise RuntimeError(
                 f"姿态状态计数不完整: {sum(statuses.values())}/{len(samples)}"

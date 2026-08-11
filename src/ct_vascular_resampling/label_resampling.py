@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -53,6 +54,26 @@ class LabelVolume:
         flat = points.reshape(-1, 3)
         indices = (flat - self.origin_xyz) @ self.physical_to_index_matrix.T
         return indices.reshape(points.shape)
+
+
+def load_label_volume(
+    path: str | Path,
+    *,
+    input_coordinate_system: str = "RAS",
+) -> LabelVolume:
+    """读取单个 NIfTI/NRRD 离散标签体并保留其物理空间。"""
+
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"标签文件不存在: {source}")
+    name = source.name.lower()
+    if not name.endswith((".nii", ".nii.gz", ".nrrd")):
+        raise ValueError(f"仅支持 NIfTI 或 NRRD 标签图: {source}")
+    image = sitk.ReadImage(str(source))
+    return LabelVolume.from_sitk(
+        image,
+        input_coordinate_system=input_coordinate_system,
+    )
 
 
 def validate_label_geometry(ct: CTVolume, labels: LabelVolume, *, atol_mm: float = 1e-6) -> None:

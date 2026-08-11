@@ -16,6 +16,7 @@ from ct_vascular_resampling.config import (
     CaseConfig,
     FilterConfig,
     GeometryConfig,
+    ManualSegmentationConfig,
     RuntimeConfig,
     SamplingConfig,
     SquareConfig,
@@ -24,10 +25,43 @@ from ct_vascular_resampling.config import (
 from ct_vascular_resampling.centerline import CenterlinePath, CenterlineSelectionAudit
 from ct_vascular_resampling.ct_resampling import CTVolume, diagnose_square_fov
 from ct_vascular_resampling.gallery import GalleryWriter
+from ct_vascular_resampling.label_resampling import CpuLabelBackend
 import ct_vascular_resampling.pipeline as pipeline_module
 from ct_vascular_resampling.pipeline import PreparedVessel, render_precomputed_square, render_square_sample, run_case
 from ct_vascular_resampling.resampling_backend import CachedCpuBackend
 from ct_vascular_resampling.sampling_pipeline import SquareSample, SurfaceSamples
+
+
+def _manual_segmentation_config(path: Path) -> ManualSegmentationConfig:
+    return ManualSegmentationConfig(
+        path=path,
+        organ_label_values={
+            "spleen": (1,),
+            "kidney_right": (2,),
+            "kidney_left": (3,),
+            "gallbladder": (4,),
+            "esophagus": (5,),
+            "liver": (6,),
+            "stomach": (7,),
+            "aorta": (8,),
+            "inferior_vena_cava": (9,),
+            "pancreas": (11,),
+            "adrenal_gland_right": (12,),
+            "adrenal_gland_left": (13,),
+            "duodenum": (14,),
+            "portal_vein": (23, 26, 33, 34, 35, 36, 37),
+        },
+        eus_vessel_label_values={
+            "aorta": (8,),
+            "inferior_vena_cava": (9,),
+            "portal_vein": (26, 33, 34, 35, 36, 37),
+        },
+        eus_vessel_colors={
+            "aorta": (255, 0, 0),
+            "inferior_vena_cava": (0, 0, 255),
+            "portal_vein": (170, 85, 255),
+        },
+    )
 
 
 def test_gallery_organ_summary_counts_slices_and_rejects_legacy_records(tmp_path):
@@ -208,6 +242,119 @@ def test_precomputed_square_writes_the_same_gallery_artifacts(tmp_path):
     assert record["resampling_backend"] == "cpu"
 
 
+def test_manual_precomputed_square_adds_eus_outputs_without_changing_original_vessels(tmp_path):
+    vessel_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    vessel_mesh.apply_translation((7.0, 7.0, 5.0))
+    sample = SquareSample(
+        sample_id="stomach-000000-x-00",
+        organ="stomach",
+        probe_point_world=np.asarray([7.0, 7.0, 5.0]),
+        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
+        vertices=np.asarray(
+            [[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]
+        ),
+    )
+    vessels = [PreparedVessel("portal_tree", "portal", (255, 0, 255), vessel_mesh)]
+    hu = np.full((20, 20), 40.0, dtype=np.float32)
+    labels = np.zeros((20, 20), dtype=np.uint8)
+    labels[7:12, 7:12] = 8
+    labels[0:4, 15:19] = 9
+    legacy_writer = GalleryWriter(tmp_path / "legacy", "case")
+    manual_writer = GalleryWriter(
+        tmp_path / "manual",
+        "case",
+        manual_segmentation_enabled=True,
+    )
+
+    legacy_status = render_precomputed_square(
+        sample,
+        hu,
+        vessels,
+        CTConfig(output_resolution=20),
+        FilterConfig(),
+        legacy_writer,
+        resampling_backend="cpu",
+    )
+    manual_status = render_precomputed_square(
+        sample,
+        hu,
+        vessels,
+        CTConfig(output_resolution=20),
+        FilterConfig(),
+        manual_writer,
+        resampling_backend="cpu",
+        label_plane=labels,
+        manual_segmentation=_manual_segmentation_config(Path("unused.seg.nrrd")),
+    )
+
+    legacy_record = json.loads((tmp_path / "legacy/gallery/gallery.jsonl").read_text(encoding="utf-8"))
+    manual_record = json.loads((tmp_path / "manual/gallery/gallery.jsonl").read_text(encoding="utf-8"))
+    assert legacy_status == manual_status == "gallery"
+    assert manual_record["features"] == legacy_record["features"]
+    for directory in ("boundary_only", "ct_overlay"):
+        assert (
+            tmp_path / "manual/gallery" / directory / f"{sample.sample_id}.png"
+        ).read_bytes() == (
+            tmp_path / "legacy/gallery" / directory / f"{sample.sample_id}.png"
+        ).read_bytes()
+    assert manual_record["eus_vessel_labels"] == ["aorta", "inferior_vena_cava"]
+    assert [item["label"] for item in manual_record["eus_vessel_features"]] == ["aorta"]
+    with Image.open(tmp_path / "manual/gallery" / manual_record["eus_vessel_boundary_png"]) as image:
+        colors = set(image.convert("RGB").getdata())
+    assert (255, 0, 0) in colors
+    assert (0, 0, 255) in colors
+
+
+@pytest.mark.parametrize(
+    ("hu_value", "vessels", "expected_status"),
+    [(-1000.0, ["mesh"], "rejected"), (40.0, [], "unindexed")],
+)
+def test_manual_label_analysis_is_skipped_outside_original_gallery(
+    monkeypatch,
+    tmp_path,
+    hu_value,
+    vessels,
+    expected_status,
+):
+    sample = SquareSample(
+        sample_id="sample",
+        organ="stomach",
+        probe_point_world=np.asarray([7.0, 7.0, 5.0]),
+        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
+        vertices=np.asarray(
+            [[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]
+        ),
+    )
+    prepared = []
+    if vessels:
+        mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+        mesh.apply_translation((7.0, 7.0, 5.0))
+        prepared = [PreparedVessel("portal_tree", "portal", (255, 0, 255), mesh)]
+    writer = GalleryWriter(
+        tmp_path / "case",
+        "case",
+        manual_segmentation_enabled=True,
+    )
+
+    def unexpected_analysis(*_args, **_kwargs):
+        raise AssertionError("non-gallery samples must not analyze manual labels")
+
+    monkeypatch.setattr(pipeline_module, "analyze_manual_label_plane", unexpected_analysis)
+
+    status = render_precomputed_square(
+        sample,
+        np.full((20, 20), hu_value, dtype=np.float32),
+        prepared,
+        CTConfig(output_resolution=20),
+        FilterConfig(),
+        writer,
+        label_plane=np.zeros((20, 20), dtype=np.uint8),
+        manual_segmentation=_manual_segmentation_config(Path("unused.seg.nrrd")),
+    )
+
+    assert status == expected_status
+
+
 def test_rejected_precomputed_square_skips_vessel_intersection(monkeypatch, tmp_path):
     sample = SquareSample(
         sample_id="stomach-000000-x-00",
@@ -372,6 +519,198 @@ def _single_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
         local_z_world=np.asarray([0.0, 1.0, 0.0]),
     )
     return config, outside_sample
+
+
+def _manual_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
+    config, sample = _single_fov_case(tmp_path)
+    label_path = tmp_path / "labels.nrrd"
+    sitk.WriteImage(
+        sitk.GetImageFromArray(np.zeros((16, 16, 16), dtype=np.uint8)),
+        str(label_path),
+    )
+    return replace(config, manual_segmentation=_manual_segmentation_config(label_path)), sample
+
+
+def test_manual_run_loads_labels_once_and_samples_same_square_batch_as_ct(monkeypatch, tmp_path):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    label_load_count = 0
+    original_load = pipeline_module.load_label_volume
+    ct_vertices: list[np.ndarray] = []
+    label_vertices: list[np.ndarray] = []
+    original_ct_sample = CachedCpuBackend.sample_many
+    original_label_sample = CpuLabelBackend.sample_many
+
+    def record_load(*args, **kwargs):
+        nonlocal label_load_count
+        label_load_count += 1
+        return original_load(*args, **kwargs)
+
+    def record_ct(self, vertices_batch, resolution, fill_hu_value):
+        ct_vertices.append(np.asarray(vertices_batch).copy())
+        return original_ct_sample(self, vertices_batch, resolution, fill_hu_value)
+
+    def record_labels(self, vertices_batch, resolution):
+        label_vertices.append(np.asarray(vertices_batch).copy())
+        return original_label_sample(self, vertices_batch, resolution)
+
+    monkeypatch.setattr(pipeline_module, "load_label_volume", record_load)
+    monkeypatch.setattr(CachedCpuBackend, "sample_many", record_ct)
+    monkeypatch.setattr(CpuLabelBackend, "sample_many", record_labels)
+
+    summary = run_case(config, steps=["render"], workers=1)
+
+    assert summary.status_counts == {"excluded_fov": 1}
+    assert label_load_count == 1
+    assert len(ct_vertices) == len(label_vertices) == 1
+    assert np.array_equal(ct_vertices[0], label_vertices[0])
+
+
+def test_manual_run_rejects_label_geometry_before_writing_run_artifacts(monkeypatch, tmp_path):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    mismatched = sitk.GetImageFromArray(np.zeros((15, 16, 16), dtype=np.uint8))
+    sitk.WriteImage(mismatched, str(config.manual_segmentation.path))
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+
+    with pytest.raises(ValueError, match="Size"):
+        run_case(config, steps=["render"], workers=1)
+
+    case_directory = config.output_root / config.case_id
+    assert not (case_directory / "manifest.jsonl").exists()
+    assert not (case_directory / "run_metadata.json").exists()
+
+
+def _force_cpu_ct_backend(volume, **kwargs):
+    return CachedCpuBackend(volume), {
+        "requested_backend": kwargs["backend"],
+        "selected_backend": "cpu",
+        "gpu_device": kwargs["gpu_device"],
+        "gpu_batch_size": kwargs["gpu_batch_size"],
+        "fallback_reason": None,
+        "coefficient_dtype": "float64",
+    }
+
+
+@pytest.mark.parametrize("requested_backend", ["auto", "gpu"])
+def test_manual_run_handles_label_gpu_calibration_mismatch_by_runtime_policy(
+    monkeypatch,
+    tmp_path,
+    requested_backend,
+):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    config = replace(config, runtime=replace(config.runtime, backend=requested_backend))
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    monkeypatch.setattr(pipeline_module, "create_sampling_backend", _force_cpu_ct_backend)
+
+    def mismatched_label_backend(volume, **kwargs):
+        reference = CpuLabelBackend(volume)
+
+        class Mismatch:
+            name = "gpu:0"
+
+            def sample_many(self, vertices_batch, resolution):
+                result = reference.sample_many(vertices_batch, resolution).copy()
+                result[0, 0, 0] ^= np.uint8(1)
+                return result
+
+            def close(self):
+                pass
+
+        return Mismatch(), {
+            "requested_backend": kwargs["backend"],
+            "selected_backend": "gpu:0",
+            "gpu_device": 0,
+            "gpu_batch_size": 32,
+            "fallback_reason": None,
+            "interpolation": "nearest",
+            "outside_label_value": 0,
+        }
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "create_label_sampling_backend",
+        mismatched_label_backend,
+    )
+
+    if requested_backend == "gpu":
+        with pytest.raises(ValueError, match="标签|校验|CPU"):
+            run_case(config, steps=["render"], workers=1)
+        assert not (config.output_root / config.case_id / "manifest.jsonl").exists()
+    else:
+        summary = run_case(config, steps=["render"], workers=1)
+        metadata = json.loads(
+            (config.output_root / config.case_id / "run_metadata.json").read_text(encoding="utf-8")
+        )
+        assert summary.status_counts == {"excluded_fov": 1}
+        assert metadata["label_sampling"]["selected_backend"] == "cpu"
+        assert metadata["label_sampling"]["calibration"]["accepted"] is False
+        assert metadata["label_sampling"]["fallback_reason"]
+
+
+def test_manual_run_auto_falls_back_after_label_gpu_runtime_failure(monkeypatch, tmp_path):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    config = replace(config, runtime=replace(config.runtime, backend="auto"))
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    monkeypatch.setattr(pipeline_module, "create_sampling_backend", _force_cpu_ct_backend)
+
+    def failing_label_backend(volume, **kwargs):
+        reference = CpuLabelBackend(volume)
+
+        class FailsAfterCalibration:
+            name = "gpu:0"
+
+            def __init__(self):
+                self.calls = 0
+
+            def sample_many(self, vertices_batch, resolution):
+                self.calls += 1
+                if self.calls > 1:
+                    raise RuntimeError("simulated label GPU runtime failure")
+                return reference.sample_many(vertices_batch, resolution)
+
+            def close(self):
+                pass
+
+        return FailsAfterCalibration(), {
+            "requested_backend": kwargs["backend"],
+            "selected_backend": "gpu:0",
+            "gpu_device": 0,
+            "gpu_batch_size": 32,
+            "fallback_reason": None,
+            "interpolation": "nearest",
+            "outside_label_value": 0,
+        }
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "create_label_sampling_backend",
+        failing_label_backend,
+    )
+
+    summary = run_case(config, steps=["render"], workers=1)
+
+    metadata = json.loads(
+        (config.output_root / config.case_id / "run_metadata.json").read_text(encoding="utf-8")
+    )
+    assert summary.status_counts == {"excluded_fov": 1}
+    assert metadata["label_sampling"]["selected_backend"] == "cpu"
+    assert "simulated label GPU runtime failure" in metadata["label_sampling"]["fallback_reason"]
 
 
 def test_run_case_resamples_fov_square_and_records_exclusion(monkeypatch, tmp_path):
