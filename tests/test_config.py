@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import importlib
 
 import pytest
+import yaml
 
 from ct_vascular_resampling.config import ORGAN_BOUNDARY_MODEL_IDS, REQUIRED_ORGAN_IDS, load_case_config
 
@@ -38,6 +40,53 @@ registration_module_path: registration_2021.py
 """
 
 
+def _valid_manual_segmentation() -> dict:
+    return {
+        "path": "labels/EUS-main-organ.seg.nrrd",
+        "organ_label_values": {
+            "spleen": [1],
+            "kidney_right": [2],
+            "kidney_left": [3],
+            "gallbladder": [4],
+            "esophagus": [5],
+            "liver": [6],
+            "stomach": [7],
+            "aorta": [8],
+            "inferior_vena_cava": [9],
+            "pancreas": [11],
+            "adrenal_gland_right": [12],
+            "adrenal_gland_left": [13],
+            "duodenum": [14],
+            "portal_vein": [23, 26, 33, 34, 35, 36, 37],
+        },
+        "eus_vessel_label_values": {
+            "aorta": [8],
+            "inferior_vena_cava": [9],
+            "portal_vein": [26, 33, 34, 35, 36, 37],
+        },
+        "eus_vessel_colors": {
+            "aorta": [255, 0, 0],
+            "inferior_vena_cava": [0, 0, 255],
+            "portal_vein": [170, 85, 255],
+        },
+    }
+
+
+def _write_manual_case(tmp_path, manual_segmentation: dict):
+    organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        _case_yaml(organ_models)
+        + yaml.safe_dump(
+            {"manual_segmentation": manual_segmentation},
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 def test_case_config_resolves_relative_paths_and_uses_confirmed_defaults(tmp_path):
     organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
     config_path = tmp_path / "case.yaml"
@@ -60,6 +109,70 @@ def test_case_config_resolves_relative_paths_and_uses_confirmed_defaults(tmp_pat
     assert config.runtime.seed == 0
     assert config.filtering.black_ratio_limit == 0.50
     assert [model.label for model in config.vessel_models] == ["portal", "hepatic"]
+    assert config.manual_segmentation is None
+
+
+def test_case_config_loads_strict_manual_segmentation_mode(tmp_path):
+    config = load_case_config(_write_manual_case(tmp_path, _valid_manual_segmentation()))
+
+    manual = config.manual_segmentation
+    assert manual is not None
+    assert manual.path == tmp_path / "labels/EUS-main-organ.seg.nrrd"
+    assert manual.organ_label_values["portal_vein"] == (23, 26, 33, 34, 35, 36, 37)
+    assert manual.eus_vessel_label_values["portal_vein"] == (26, 33, 34, 35, 36, 37)
+    assert manual.eus_vessel_colors == {
+        "aorta": (255, 0, 0),
+        "inferior_vena_cava": (0, 0, 255),
+        "portal_vein": (170, 85, 255),
+    }
+
+
+def _missing_organ(mapping: dict) -> None:
+    mapping["organ_label_values"].pop("spleen")
+
+
+def _unknown_vessel(mapping: dict) -> None:
+    mapping["eus_vessel_label_values"]["superior_mesenteric_vein"] = [26]
+
+
+def _empty_label_values(mapping: dict) -> None:
+    mapping["organ_label_values"]["spleen"] = []
+
+
+def _duplicate_organ_label(mapping: dict) -> None:
+    mapping["organ_label_values"]["spleen"] = [2]
+
+
+def _boolean_label(mapping: dict) -> None:
+    mapping["organ_label_values"]["spleen"] = [True]
+
+
+def _non_integer_label(mapping: dict) -> None:
+    mapping["organ_label_values"]["spleen"] = [1.5]
+
+
+def _invalid_color(mapping: dict) -> None:
+    mapping["eus_vessel_colors"]["aorta"] = [255, 0]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (_missing_organ, "spleen|缺少"),
+        (_unknown_vessel, "superior_mesenteric_vein|不支持"),
+        (_empty_label_values, "spleen|非空"),
+        (_duplicate_organ_label, "重复|spleen|kidney_right"),
+        (_boolean_label, "spleen|整数"),
+        (_non_integer_label, "spleen|整数"),
+        (_invalid_color, "aorta|color|颜色"),
+    ],
+)
+def test_case_config_rejects_invalid_manual_segmentation_contract(tmp_path, mutation, message):
+    manual = copy.deepcopy(_valid_manual_segmentation())
+    mutation(manual)
+
+    with pytest.raises(ValueError, match=message):
+        load_case_config(_write_manual_case(tmp_path, manual))
 
 
 def test_case_config_rejects_missing_source_algorithm_organ(tmp_path):

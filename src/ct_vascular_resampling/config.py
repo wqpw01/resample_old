@@ -58,6 +58,7 @@ ORGAN_BOUNDARY_MODEL_IDS = {
     "stomach": "stomach",
 }
 ORGAN_BOUNDARY_IDS = tuple(ORGAN_BOUNDARY_MODEL_IDS)
+EUS_VESSEL_IDS = ("aorta", "inferior_vena_cava", "portal_vein")
 DEFAULT_ORGAN_COLORS = {
     "adrenal_gland_left": (31, 119, 180),
     "adrenal_gland_right": (174, 199, 232),
@@ -137,6 +138,14 @@ class GeometryConfig:
 
 
 @dataclass(frozen=True)
+class ManualSegmentationConfig:
+    path: Path
+    organ_label_values: dict[str, tuple[int, ...]]
+    eus_vessel_label_values: dict[str, tuple[int, ...]]
+    eus_vessel_colors: dict[str, tuple[int, int, int]]
+
+
+@dataclass(frozen=True)
 class CaseConfig:
     case_id: str
     ct_path: Path
@@ -151,6 +160,7 @@ class CaseConfig:
     runtime: RuntimeConfig
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     dicom_series_uid: str | None = None
+    manual_segmentation: ManualSegmentationConfig | None = None
 
 
 def _as_path(value: Any, config_directory: Path, field: str) -> Path:
@@ -384,6 +394,87 @@ def _load_runtime(raw: Any) -> RuntimeConfig:
     )
 
 
+def _require_exact_keys(values: dict[str, Any], expected: set[str], field: str) -> None:
+    missing = sorted(expected - set(values))
+    if missing:
+        raise ValueError(f"{field} 缺少配置: {', '.join(missing)}")
+    unexpected = sorted(set(values) - expected)
+    if unexpected:
+        raise ValueError(f"{field} 包含不支持的配置: {', '.join(unexpected)}")
+
+
+def _load_label_values(raw: Any, expected: tuple[str, ...], field: str) -> dict[str, tuple[int, ...]]:
+    values = _mapping(raw, field)
+    _require_exact_keys(values, set(expected), field)
+    result: dict[str, tuple[int, ...]] = {}
+    owners: dict[int, str] = {}
+    for identifier in expected:
+        source = values[identifier]
+        item_field = f"{field}.{identifier}"
+        if not isinstance(source, list) or not source:
+            raise ValueError(f"{item_field} 必须是非空整数列表")
+        if any(isinstance(item, bool) or not isinstance(item, int) for item in source):
+            raise ValueError(f"{item_field} 必须是非空整数列表")
+        if any(item < 0 or item > 255 for item in source):
+            raise ValueError(f"{item_field} 标签值必须在 0-255 内")
+        if len(set(source)) != len(source):
+            raise ValueError(f"{item_field} 包含重复标签值")
+        for label_value in source:
+            previous = owners.get(label_value)
+            if previous is not None:
+                raise ValueError(
+                    f"{field} 标签值 {label_value} 在 {previous} 与 {identifier} 中重复"
+                )
+            owners[label_value] = identifier
+        result[identifier] = tuple(source)
+    return result
+
+
+def _load_manual_segmentation(raw: Any, config_directory: Path) -> ManualSegmentationConfig | None:
+    if raw is None:
+        return None
+    values = _mapping(raw, "manual_segmentation")
+    expected_fields = {
+        "path",
+        "organ_label_values",
+        "eus_vessel_label_values",
+        "eus_vessel_colors",
+    }
+    _require_exact_keys(values, expected_fields, "manual_segmentation")
+    colors_raw = _mapping(values["eus_vessel_colors"], "manual_segmentation.eus_vessel_colors")
+    _require_exact_keys(
+        colors_raw,
+        set(EUS_VESSEL_IDS),
+        "manual_segmentation.eus_vessel_colors",
+    )
+    colors: dict[str, tuple[int, int, int]] = {}
+    for identifier in EUS_VESSEL_IDS:
+        source = colors_raw[identifier]
+        if (
+            not isinstance(source, list)
+            or len(source) != 3
+            or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > 255 for item in source)
+        ):
+            raise ValueError(
+                f"manual_segmentation.eus_vessel_colors.{identifier} 颜色必须是三个 0-255 整数"
+            )
+        colors[identifier] = tuple(source)
+    return ManualSegmentationConfig(
+        path=_as_path(values["path"], config_directory, "manual_segmentation.path"),
+        organ_label_values=_load_label_values(
+            values["organ_label_values"],
+            ORGAN_BOUNDARY_IDS,
+            "manual_segmentation.organ_label_values",
+        ),
+        eus_vessel_label_values=_load_label_values(
+            values["eus_vessel_label_values"],
+            EUS_VESSEL_IDS,
+            "manual_segmentation.eus_vessel_label_values",
+        ),
+        eus_vessel_colors=colors,
+    )
+
+
 def load_case_config(path: str | Path) -> CaseConfig:
     """读取一个无 P/N/D 的 CT 血管重采样病例。"""
 
@@ -419,4 +510,8 @@ def load_case_config(path: str | Path) -> CaseConfig:
         runtime=_load_runtime(values.get("runtime")),
         geometry=_load_geometry(values.get("geometry")),
         dicom_series_uid=dicom_series_uid,
+        manual_segmentation=_load_manual_segmentation(
+            values.get("manual_segmentation"),
+            config_directory,
+        ),
     )
