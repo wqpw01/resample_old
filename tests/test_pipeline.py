@@ -209,7 +209,7 @@ def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):
     record = json.loads((tmp_path / "case" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8"))
     assert record["organ_labels"] == ["liver"]
     assert record["coordinate_system"] == "RAS"
-    assert record["core_design_sha256"] == "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
+    assert record["core_design_sha256"] == "de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca"
     assert len(record["build_git_commit"]) == 40
     assert record["source_region"] == "stomach"
     assert record["angles_degrees"] == {"roll": -5.0, "pitch": 0.0, "yaw": 30.0}
@@ -1316,20 +1316,21 @@ class HMMPoseEstimator:
     monkeypatch.setattr(CachedCpuBackend, "sample_many", record_cpu_batch)
 
     dry = run_case(config, dry_run=True)
-    assert dry.total_squares == 455
+    assert dry.total_squares == 3211
     assert not (tmp_path / "output").exists()
 
     completed = run_case(config)
 
-    assert completed.total_squares == 455
+    assert completed.total_squares == 3211
     assert (tmp_path / "output" / "case_001" / "ResampledpointPLY" / "FPS-Stomach.ply").is_file()
     assert (tmp_path / "output" / "case_001" / "squarePLY" / "Stomach-vertex.ply").is_file()
     assert (tmp_path / "output" / "case_001" / "gallery" / "gallery.jsonl").is_file()
     metadata = json.loads((tmp_path / "output" / "case_001" / "run_metadata.json").read_text(encoding="utf-8"))
     assert metadata["selected_backend"] == "cpu"
-    assert metadata["total_squares"] == 455
+    assert metadata["total_squares"] == 3211
     assert metadata["coordinate_system"] == "RAS"
-    assert metadata["core_design_sha256"] == "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
+    assert metadata["core_design_filename"] == "基于目标器官的采样方法-20260813.docx"
+    assert metadata["core_design_sha256"] == "de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca"
     assert len(metadata["build_git_commit"]) == 40
     assert metadata["minimum_point_spacing_mm"] == 10.0
     assert metadata["sampling_configuration"]["duodenum_centerline_endpoint_hints_ras_mm"] == {
@@ -1341,8 +1342,21 @@ class HMMPoseEstimator:
     assert metadata["duodenum_centerline_selection"]["matched_proximal_ras_mm"] == [19.0, 24.0, 700.0]
     assert metadata["duodenum_centerline_selection"]["path_point_count"] == 166
     assert metadata["duodenum_centerline_selection"]["automatic_terminal_spur_pruning_applied"] is False
-    assert metadata["pose_angles_degrees"]["roll"] == [-15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0]
-    assert metadata["pose_angles_degrees"]["pitch"] == [-10.0, -5.0, 0.0, 5.0, 10.0]
+    assert metadata["sampling_configuration"]["esophagus_extension_target_filter"] == (
+        "original_and_translated_segments_independently"
+    )
+    assert metadata["pose_angles_degrees"]["roll"] == list(np.arange(-45.0, 46.0, 5.0))
+    assert metadata["pose_angles_degrees"]["pitch"] == list(np.arange(-30.0, 31.0, 5.0))
+    assert metadata["pose_angles_degrees"]["yaw"]["duodenum_bulb"] == list(
+        np.arange(-120.0, 31.0, 5.0)
+    )
+    assert metadata["pose_convention"] == {
+        "coordinate_frame": "local_right_handed",
+        "matrix_order": "B @ Rz(yaw) @ Ry(pitch) @ Rx(roll)",
+        "positive_yaw": "counterclockwise",
+        "yaw_observer": "local_positive_z_looking_toward_probe",
+        "rotation_center": "probe_at_square_bottom_edge_midpoint",
+    }
     assert metadata["square_sampling"] == {
         "side_length_mm": 10.0,
         "output_resolution": [20, 20],
@@ -1384,9 +1398,9 @@ class HMMPoseEstimator:
         "excluded_organ_labels": ["bile_duct", "common_bile_duct"],
         "geometry_sources": {"portal_vein": "portal_vein_and_splenic_vein"},
     }
-    assert metadata["completed_pose_count"] == 455
+    assert metadata["completed_pose_count"] == 3211
     assert metadata["status_counts"] == completed.status_counts
-    assert cpu_batch_sizes == [8] * 56 + [7]
+    assert cpu_batch_sizes == [8] * 401 + [3]
     library_summary = json.loads((tmp_path / "output" / "case_001" / "library_summary.json").read_text(encoding="utf-8"))
     assert library_summary["case_id"] == "case_001"
     assert library_summary["indexed_feature_count"] == completed.indexed_feature_count
@@ -1423,8 +1437,8 @@ class HMMPoseEstimator:
     )
     resumed = run_case(config)
     assert cpu_batch_sizes == calls_after_first_run
-    assert sum(resumed.status_counts.values()) == 455
-    assert len((tmp_path / "output" / "case_001" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()) == 455
+    assert sum(resumed.status_counts.values()) == 3211
+    assert len((tmp_path / "output" / "case_001" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()) == 3211
 
     rectangles_before_incompatible_resume = (
         tmp_path / "output" / "case_001" / "rectangles.ply"

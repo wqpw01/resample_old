@@ -54,14 +54,36 @@ def test_pose_variants_use_confirmed_roll_pitch_and_region_yaw_ranges():
     bulb = generate_pose_variants(np.zeros(3), frame, 100.0, DUODENUM_BULB_YAW)
     special = generate_pose_variants(np.zeros(3), frame, 100.0, PANCREAS_SPECIAL_YAW)
 
-    assert {value.roll_degrees for value in standard} == {-15.0, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0}
-    assert {value.pitch_degrees for value in standard} == {-10.0, -5.0, 0.0, 5.0, 10.0}
+    assert {value.roll_degrees for value in standard} == set(np.arange(-45.0, 46.0, 5.0))
+    assert {value.pitch_degrees for value in standard} == set(np.arange(-30.0, 31.0, 5.0))
     assert {value.yaw_degrees for value in standard} == set(np.arange(-30.0, 31.0, 5.0))
-    assert {value.yaw_degrees for value in bulb} == set(np.arange(-90.0, 91.0, 5.0))
+    assert {value.yaw_degrees for value in bulb} == set(np.arange(-120.0, 31.0, 5.0))
     assert {value.yaw_degrees for value in special} == set(np.arange(-120.0, 31.0, 5.0))
-    assert len(standard) == 455
-    assert len(bulb) == 1295
-    assert len(special) == 1085
+    assert len(standard) == 3211
+    assert len(bulb) == 7657
+    assert len(special) == 7657
+
+
+def test_positive_yaw_is_counterclockwise_when_viewed_from_local_positive_z():
+    frame = ordinary_local_frame(
+        np.zeros(3),
+        np.asarray([1.0, 0.0, 0.0]),
+        np.asarray([0.0, -1.0, 0.0]),
+    )
+
+    positive = next(
+        value
+        for value in generate_pose_variants(np.zeros(3), frame, 100.0, STANDARD_YAW)
+        if value.roll_degrees == value.pitch_degrees == 0.0 and value.yaw_degrees == 5.0
+    )
+
+    assert positive.local_frame.x_axis[1] > 0.0
+    assert np.allclose(
+        (positive.vertices[0] + positive.vertices[1]) / 2.0,
+        np.zeros(3),
+        rtol=0.0,
+        atol=1e-12,
+    )
 
 
 def test_zero_pose_keeps_probe_at_bottom_center_and_uses_100_mm_forward_depth():

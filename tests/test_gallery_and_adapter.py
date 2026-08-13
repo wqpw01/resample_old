@@ -573,7 +573,7 @@ def test_gallery_writer_strict_pose_protocol_rejects_legacy_completed_record(tmp
         GalleryWriter(
             case_directory,
             case_id="case_001",
-            required_core_design_sha256="4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b",
+            required_core_design_sha256="de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca",
         )
 
 

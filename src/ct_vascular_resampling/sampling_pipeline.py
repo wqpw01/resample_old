@@ -14,7 +14,6 @@ from .config import SamplingConfig, SquareConfig
 from .centerline import CenterlinePath, extract_duodenum_centerline
 from .mesh_io import load_surface_mesh
 from .sampling import (
-    build_esophagus_samples,
     filter_duodenum_bulb_points,
     filter_duodenum_remainder_points,
     filter_esophagus_valid_segment,
@@ -23,6 +22,7 @@ from .sampling import (
     filter_pancreas_points,
     filter_points_by_target_rays,
     extreme_plateau_centroid,
+    RayFilterResult,
     SamplingStatistics,
     sample_points_with_minimum_spacing,
 )
@@ -198,6 +198,43 @@ def _target_metadata_for_points(
     return tuple(selected)
 
 
+def _merge_ray_candidates(
+    *groups: RayFilterResult,
+) -> tuple[np.ndarray, np.ndarray, tuple[tuple[str, ...], ...]]:
+    nonempty = [group for group in groups if len(group.points)]
+    if not nonempty:
+        return (
+            np.empty((0, 3), dtype=np.float64),
+            np.empty((0, 3), dtype=np.float64),
+            (),
+        )
+    points = np.vstack([group.points for group in nonempty])
+    normals = np.vstack([group.normals for group in nonempty])
+    target_ids = tuple(targets for group in nonempty for targets in group.all_target_ids)
+    retained: list[int] = []
+    merged_targets: list[set[str]] = []
+    for index, point in enumerate(points):
+        duplicate = next(
+            (
+                retained_index
+                for retained_index, candidate_index in enumerate(retained)
+                if np.all(np.isclose(points[candidate_index], point, rtol=0.0, atol=1e-9))
+            ),
+            None,
+        )
+        if duplicate is None:
+            retained.append(index)
+            merged_targets.append(set(target_ids[index]))
+        else:
+            merged_targets[duplicate].update(target_ids[index])
+    retained_indices = np.asarray(retained, dtype=np.int64)
+    return (
+        points[retained_indices],
+        normals[retained_indices],
+        tuple(tuple(sorted(values)) for values in merged_targets),
+    )
+
+
 def sample_organs(
     organ_models: Mapping[str, str | Path],
     settings: SamplingConfig,
@@ -300,12 +337,32 @@ def sample_organs(
         meshes["liver"].vertices,
     )
     esophagus_span_mm = float(np.ptp(esophagus_points[:, 2]))
-    esophagus_rays = filter_points_by_target_rays(
+    esophagus_original_rays = filter_points_by_target_rays(
         esophagus_points,
         esophagus_normals,
         target_meshes,
         settings.ray_length_mm,
         settings.ray_batch_size,
+    )
+    translated_esophagus_points = esophagus_points.copy()
+    translated_esophagus_points[:, 2] -= esophagus_span_mm
+    esophagus_translated_rays = filter_points_by_target_rays(
+        translated_esophagus_points,
+        esophagus_normals,
+        target_meshes,
+        settings.ray_length_mm,
+        settings.ray_batch_size,
+    )
+    (
+        esophagus_candidate_points,
+        esophagus_candidate_normals,
+        esophagus_candidate_targets,
+    ) = _merge_ray_candidates(esophagus_original_rays, esophagus_translated_rays)
+    esophagus_valid = _valid_ordinary_indices(
+        esophagus_candidate_points,
+        esophagus_candidate_normals,
+        esophagus_anchor,
+        reverse_normal=False,
     )
 
     duodenum_upper = _sample(
@@ -339,35 +396,15 @@ def sample_organs(
         )
     else:
         duodenum = _empty_samples()
-    if len(esophagus_rays.points):
-        esophagus_result = build_esophagus_samples(
-            esophagus_rays.points,
-            esophagus_rays.normals,
+    if len(esophagus_valid):
+        esophagus = _sample(
+            esophagus_candidate_points[esophagus_valid],
+            esophagus_candidate_normals[esophagus_valid],
             settings.point_counts["esophagus"],
             seed + 5,
             settings.minimum_spacing_mm,
-            zero_plane_anchor_world=esophagus_anchor,
-            translation_span_mm=esophagus_span_mm,
-        )
-        esophagus = SurfaceSamples(
-            esophagus_result.points,
-            esophagus_result.normals,
-            {"esophagus": esophagus_result.stats},
-            tuple("esophagus" for _ in esophagus_result.indices),
-            _target_metadata_for_points(
-                np.vstack(
-                    [
-                        esophagus_rays.points,
-                        esophagus_rays.points
-                        - np.asarray(
-                            [0.0, 0.0, esophagus_span_mm],
-                            dtype=np.float64,
-                        ),
-                    ]
-                ),
-                esophagus_rays.all_target_ids + esophagus_rays.all_target_ids,
-                esophagus_result.points,
-            ),
+            "esophagus",
+            target_ids=tuple(esophagus_candidate_targets[index] for index in esophagus_valid),
             zero_plane_anchor_world=esophagus_anchor,
         )
     else:

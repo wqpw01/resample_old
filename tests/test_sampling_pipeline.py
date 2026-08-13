@@ -43,8 +43,8 @@ def test_square_sample_expansion_uses_confirmed_axis_count_and_variant_count():
 
     stomach = [sample for sample in samples if sample.organ == "stomach"]
     esophagus = [sample for sample in samples if sample.organ == "esophagus"]
-    assert len(stomach) == 455
-    assert len(esophagus) == 455
+    assert len(stomach) == 3211
+    assert len(esophagus) == 3211
     assert stomach[0].sample_id.startswith("stomach-000000-")
     assert np.isclose(np.linalg.norm(stomach[0].vertices[1] - stomach[0].vertices[0]), 100.0)
 
@@ -64,7 +64,7 @@ def test_square_sample_expansion_returns_a_reiterable_pose_stream_instead_of_a_l
     samples = generate_square_samples(surfaces, SquareConfig())
 
     assert not isinstance(samples, list)
-    assert len(samples) == 455
+    assert len(samples) == 3211
     first_ids = [sample.sample_id for sample in samples]
     second_ids = [sample.sample_id for sample in samples]
     assert first_ids == second_ids
@@ -85,7 +85,7 @@ def test_square_sample_expansion_uses_pancreas_special_yaw_policy():
     samples = generate_square_samples(surfaces, SquareConfig())
 
     stomach = [sample for sample in samples if sample.organ == "stomach"]
-    assert len(stomach) == 1085
+    assert len(stomach) == 7657
     assert {sample.yaw_policy for sample in stomach} == {"pancreas_special"}
     assert min(sample.yaw_degrees for sample in stomach) == -120.0
     assert max(sample.yaw_degrees for sample in stomach) == 30.0
@@ -110,7 +110,7 @@ def test_duodenum_pancreas_ray_hit_does_not_use_the_stomach_pancreas_special_yaw
 
     samples = generate_square_samples(surfaces, SquareConfig())
 
-    assert len(samples) == 455
+    assert len(samples) == 3211
     assert {sample.yaw_policy for sample in samples} == {"standard"}
 
 
@@ -136,10 +136,10 @@ def test_exact_duplicate_pose_keeps_base_region_and_records_supplement_source():
 
     samples = generate_square_samples(surfaces, SquareConfig())
 
-    assert len(samples) == 455
+    assert len(samples) == 3211
     assert {sample.organ for sample in samples} == {"stomach"}
     assert {sample.duplicate_source_regions for sample in samples} == {("liver_supplement",)}
-    assert len({sample.sample_id for sample in samples}) == 455
+    assert len({sample.sample_id for sample in samples}) == 3211
     assert all("-r" in sample.sample_id and "-p" in sample.sample_id and "-y" in sample.sample_id for sample in samples)
 
 
@@ -273,12 +273,20 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypat
         np.arange(len(centerline_points), dtype=np.float64),
     )
     captured = {}
+    ray_origins: list[np.ndarray] = []
 
     def record_centerline(*_args, **kwargs):
         captured.update(kwargs)
         return centerline
 
     monkeypatch.setattr("ct_vascular_resampling.sampling_pipeline.extract_duodenum_centerline", record_centerline)
+    original_filter = sampling_pipeline_module.filter_points_by_target_rays
+
+    def record_ray_origins(points, *args, **kwargs):
+        ray_origins.append(np.asarray(points, dtype=np.float64).copy())
+        return original_filter(points, *args, **kwargs)
+
+    monkeypatch.setattr(sampling_pipeline_module, "filter_points_by_target_rays", record_ray_origins)
 
     samples = sample_organs(paths, settings, seed=0, input_coordinate_system="RAS")
 
@@ -288,5 +296,8 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypat
     assert set(samples["duodenum"].sampling_statistics) == {"duodenum_bulb", "duodenum_remainder"}
     assert captured["endpoint_hints_ras_mm"] == settings.duodenum_centerline_endpoint_hints_ras_mm
     assert captured["endpoint_match_tolerance_mm"] == 1.0
+    assert len(ray_origins) == 4
+    assert np.array_equal(ray_origins[-2][:, :2], ray_origins[-1][:, :2])
+    assert np.all(ray_origins[-2][:, 2] > ray_origins[-1][:, 2])
     for organ in ("stomach", "duodenum", "esophagus"):
         assert all(target_ids for target_ids in samples[organ].target_ids)

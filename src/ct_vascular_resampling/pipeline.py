@@ -69,7 +69,8 @@ from .sampling_pipeline import ORGAN_ORDER, PoseStream, SquareSample, SurfaceSam
 from .squares import PITCH_ANGLES_DEGREES, ROLL_ANGLES_DEGREES, YAW_ANGLES_DEGREES
 
 
-CORE_DESIGN_SHA256 = "4b27aee1a6db1680e501f17bd3492a571bd169c0bf7004d79b4a512d929cc53b"
+CORE_DESIGN_FILENAME = "基于目标器官的采样方法-20260813.docx"
+CORE_DESIGN_SHA256 = "de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca"
 
 
 @cache
@@ -270,6 +271,7 @@ def _run_protocol_metadata(
     protocol: dict[str, object] = {
         "coordinate_system": config.geometry.canonical_coordinate_system,
         "input_coordinate_system": config.geometry.input_coordinate_system,
+        "core_design_filename": CORE_DESIGN_FILENAME,
         "core_design_sha256": CORE_DESIGN_SHA256,
         "build_git_commit": _build_git_commit(),
         "input_provenance": input_provenance,
@@ -278,6 +280,7 @@ def _run_protocol_metadata(
             "ray_length_mm": config.sampling.ray_length_mm,
             "ray_batch_size": config.sampling.ray_batch_size,
             "minimum_spacing_mm": config.sampling.minimum_spacing_mm,
+            "esophagus_extension_target_filter": "original_and_translated_segments_independently",
             "centerline_voxel_pitch_mm": config.sampling.centerline_voxel_pitch_mm,
             "centerline_tangent_window_mm": config.sampling.centerline_tangent_window_mm,
             "centerline_max_terminal_spur_mm": config.sampling.centerline_max_terminal_spur_mm,
@@ -302,6 +305,13 @@ def _run_protocol_metadata(
             "roll": list(ROLL_ANGLES_DEGREES),
             "pitch": list(PITCH_ANGLES_DEGREES),
             "yaw": {name: list(values) for name, values in YAW_ANGLES_DEGREES.items()},
+        },
+        "pose_convention": {
+            "coordinate_frame": "local_right_handed",
+            "matrix_order": "B @ Rz(yaw) @ Ry(pitch) @ Rx(roll)",
+            "positive_yaw": "counterclockwise",
+            "yaw_observer": "local_positive_z_looking_toward_probe",
+            "rotation_center": "probe_at_square_bottom_edge_midpoint",
         },
         "square_sampling": {
             "side_length_mm": config.square.side_length_mm,
