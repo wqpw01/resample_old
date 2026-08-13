@@ -88,7 +88,8 @@ sampling:
 square:
   side_length_mm: 100.0
   # 三轴角度是项目级固定算法，不是病例参数：
-  # roll -15..+15 / 5 deg；pitch -10..+10 / 5 deg；yaw 按三类区域策略。
+  # roll -45..+45 / 5 deg；pitch -30..+30 / 5 deg；普通 yaw -30..+30 / 5 deg；
+  # 十二指肠球部和胰腺特殊区 yaw 均为 -120..+30 / 5 deg。
 
 ct:
   output_resolution: 300
