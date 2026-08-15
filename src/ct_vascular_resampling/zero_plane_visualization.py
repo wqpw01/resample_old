@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
+import csv
 from dataclasses import dataclass
+import io
+import json
+import os
+from pathlib import Path
 import re
 
 import numpy as np
@@ -12,6 +17,14 @@ import numpy as np
 
 POINT_TOLERANCE_MM = 1e-5
 AXIS_TOLERANCE = 1e-8
+
+ORGAN_COLORS: dict[str, tuple[int, int, int]] = {
+    "stomach": (228, 87, 86),
+    "liver": (76, 120, 168),
+    "pancreas": (242, 207, 91),
+    "duodenum": (84, 162, 75),
+    "esophagus": (178, 121, 162),
+}
 
 
 @dataclass(frozen=True)
@@ -169,3 +182,216 @@ def select_zero_planes(
         )
     organ_order = {organ: index for index, organ in enumerate(expected)}
     return sorted(selected, key=lambda item: (organ_order[item.organ], item.point_index))
+
+
+def _atomic_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8", newline="\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _color(organ: str) -> tuple[int, int, int]:
+    try:
+        return ORGAN_COLORS[organ]
+    except KeyError as error:
+        raise ValueError(f"没有为器官 {organ!r} 定义可视化颜色") from error
+
+
+def _validate_provenance(provenance: Mapping[str, object]) -> dict[str, str]:
+    expected_lengths = {
+        "source_manifest_sha256": 64,
+        "core_design_sha256": 64,
+        "build_git_commit": 40,
+    }
+    result: dict[str, str] = {}
+    for key, length in expected_lengths.items():
+        value = provenance.get(key)
+        if (
+            not isinstance(value, str)
+            or len(value) != length
+            or any(character not in "0123456789abcdef" for character in value.lower())
+        ):
+            raise ValueError(f"provenance.{key} 必须是 {length} 位十六进制字符串")
+        result[key] = value.lower()
+    return result
+
+
+def _record_payload(record: ZeroPlaneRecord) -> dict[str, object]:
+    return {
+        "slice_id": record.slice_id,
+        "organ": record.organ,
+        "point_index": record.point_index,
+        "probe_point_world": record.probe.tolist(),
+        "input_normal_world": record.input_normal.tolist(),
+        "local_axes_world": {
+            "x": record.x_axis.tolist(),
+            "y": record.y_axis.tolist(),
+            "z": record.z_axis.tolist(),
+        },
+        "vertices_world": record.vertices.tolist(),
+    }
+
+
+def _points_ply(records: list[ZeroPlaneRecord], organ_ids: Mapping[str, int]) -> str:
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(records)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property float nx",
+        "property float ny",
+        "property float nz",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "property ushort organ_id",
+        "end_header",
+    ]
+    for record in records:
+        red, green, blue = _color(record.organ)
+        values = (*record.probe, *record.input_normal)
+        lines.append(
+            " ".join(f"{float(value):.9f}" for value in values)
+            + f" {red} {green} {blue} {organ_ids[record.organ]}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _edges_ply(records: list[ZeroPlaneRecord], organ_ids: Mapping[str, int]) -> str:
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(records) * 4}",
+        "property float x",
+        "property float y",
+        "property float z",
+        f"element edge {len(records) * 4}",
+        "property int vertex1",
+        "property int vertex2",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "property ushort organ_id",
+        "end_header",
+    ]
+    for record in records:
+        lines.extend(" ".join(f"{float(value):.9f}" for value in vertex) for vertex in record.vertices)
+    for record_index, record in enumerate(records):
+        red, green, blue = _color(record.organ)
+        offset = record_index * 4
+        for first, second in ((0, 1), (1, 2), (2, 3), (3, 0)):
+            lines.append(
+                f"{offset + first} {offset + second} {red} {green} {blue} {organ_ids[record.organ]}"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _faces_ply(records: list[ZeroPlaneRecord], organ_ids: Mapping[str, int]) -> str:
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(records) * 4}",
+        "property float x",
+        "property float y",
+        "property float z",
+        f"element face {len(records)}",
+        "property list uchar int vertex_indices",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "property ushort organ_id",
+        "end_header",
+    ]
+    for record in records:
+        lines.extend(" ".join(f"{float(value):.9f}" for value in vertex) for vertex in record.vertices)
+    for record_index, record in enumerate(records):
+        red, green, blue = _color(record.organ)
+        offset = record_index * 4
+        lines.append(
+            f"4 {offset} {offset + 1} {offset + 2} {offset + 3} "
+            f"{red} {green} {blue} {organ_ids[record.organ]}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _csv_text(records: list[ZeroPlaneRecord]) -> str:
+    fixed = ["slice_id", "organ", "point_index"]
+    vector_fields = [
+        "probe",
+        "normal",
+        "local_x",
+        "local_y",
+        "local_z",
+        "v0",
+        "v1",
+        "v2",
+        "v3",
+    ]
+    axes = ("x_mm", "y_mm", "z_mm")
+    fields = fixed + [f"{name}_{axis}" for name in vector_fields for axis in axes]
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
+    writer.writeheader()
+    for record in records:
+        values = {
+            "probe": record.probe,
+            "normal": record.input_normal,
+            "local_x": record.x_axis,
+            "local_y": record.y_axis,
+            "local_z": record.z_axis,
+            "v0": record.vertices[0],
+            "v1": record.vertices[1],
+            "v2": record.vertices[2],
+            "v3": record.vertices[3],
+        }
+        row: dict[str, object] = {
+            "slice_id": record.slice_id,
+            "organ": record.organ,
+            "point_index": record.point_index,
+        }
+        for name, vector in values.items():
+            for axis, value in zip(axes, vector, strict=True):
+                row[f"{name}_{axis}"] = f"{float(value):.9f}"
+        writer.writerow(row)
+    return stream.getvalue()
+
+
+def write_structured_exports(
+    records: Iterable[ZeroPlaneRecord],
+    output_directory: str | Path,
+    provenance: Mapping[str, object],
+) -> None:
+    """写出可由常见三维工具和表格程序读取的零度面结构化文件。"""
+
+    values = list(records)
+    if not values:
+        raise ValueError("不能导出空的零度面记录")
+    source = _validate_provenance(provenance)
+    organs = list(dict.fromkeys(record.organ for record in values))
+    organ_ids = {organ: index for index, organ in enumerate(organs)}
+    counts = Counter(record.organ for record in values)
+    destination = Path(output_directory)
+    _atomic_text(destination / "sampling_points.ply", _points_ply(values, organ_ids))
+    _atomic_text(destination / "zero_planes_edges.ply", _edges_ply(values, organ_ids))
+    _atomic_text(destination / "zero_planes_faces.ply", _faces_ply(values, organ_ids))
+    _atomic_text(destination / "sampling_points_zero_planes.csv", _csv_text(values))
+    payload = {
+        "schema_version": "zero-plane-visualization/v1",
+        "coordinate_system": "RAS",
+        "unit": "mm",
+        "record_count": len(values),
+        "organ_counts": dict(sorted(counts.items())),
+        "organ_colors_rgb": {organ: list(_color(organ)) for organ in organs},
+        "provenance": source,
+        "records": [_record_payload(record) for record in values],
+    }
+    _atomic_text(
+        destination / "sampling_points_zero_planes.json",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
