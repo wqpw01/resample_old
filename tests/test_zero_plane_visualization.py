@@ -5,9 +5,13 @@ from copy import deepcopy
 import json
 
 import numpy as np
+from PIL import Image
 import pytest
+import trimesh
 
 from ct_vascular_resampling.zero_plane_visualization import (
+    render_interactive_html,
+    render_static_views,
     select_zero_planes,
     write_structured_exports,
 )
@@ -161,3 +165,41 @@ def test_write_structured_exports_preserves_geometry_and_provenance(tmp_path):
     assert len(rows) == 1
     assert rows[0]["slice_id"] == "stomach-000000-rp000-pp000-yp000"
     assert float(rows[0]["v2_x_mm"]) == 100.0
+
+
+def test_render_outputs_are_offline_and_nonblank(tmp_path):
+    records = select_zero_planes([_record()], {"stomach": 1})
+    mesh = trimesh.Trimesh(
+        vertices=np.asarray(
+            [
+                [-5.0, -5.0, -5.0],
+                [5.0, -5.0, -5.0],
+                [0.0, 5.0, -5.0],
+                [0.0, 0.0, 5.0],
+            ]
+        ),
+        faces=np.asarray([[0, 1, 2], [0, 1, 3], [1, 2, 3], [2, 0, 3]]),
+        process=False,
+    )
+    meshes = {"stomach": mesh}
+
+    render_interactive_html(
+        records,
+        meshes,
+        tmp_path / "sampling_points_zero_planes_interactive.html",
+    )
+    render_static_views(records, meshes, tmp_path)
+
+    html = (tmp_path / "sampling_points_zero_planes_interactive.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'src="https://cdn.plot.ly' not in html
+    assert "Plotly.newPlot" in html
+    assert "stomach" in html
+    for name in ("isometric", "axial", "coronal", "sagittal"):
+        path = tmp_path / f"sampling_points_zero_planes_{name}.png"
+        with Image.open(path) as image:
+            pixels = np.asarray(image.convert("RGB"))
+        assert pixels.shape[0] >= 600
+        assert pixels.shape[1] >= 800
+        assert float(pixels.std()) > 0.0

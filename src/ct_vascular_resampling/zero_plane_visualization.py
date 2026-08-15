@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+from typing import Any
 
 import numpy as np
 
@@ -395,3 +396,353 @@ def write_structured_exports(
         destination / "sampling_points_zero_planes.json",
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
     )
+
+
+def _mesh_arrays(mesh: Any, maximum_faces: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or not np.all(np.isfinite(vertices)):
+        raise ValueError("器官网格顶点必须是有限的 Nx3 数组")
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("器官网格必须由三角面组成")
+    if len(faces) > maximum_faces:
+        generator = np.random.default_rng(seed)
+        faces = faces[np.sort(generator.choice(len(faces), maximum_faces, replace=False))]
+    return vertices, faces
+
+
+def _css_color(color: tuple[int, int, int]) -> str:
+    return f"rgb({color[0]},{color[1]},{color[2]})"
+
+
+def _plane_mesh(records: list[ZeroPlaneRecord]) -> tuple[np.ndarray, np.ndarray]:
+    vertices = np.concatenate([record.vertices for record in records], axis=0)
+    faces: list[tuple[int, int, int]] = []
+    for index in range(len(records)):
+        offset = index * 4
+        faces.extend(((offset, offset + 1, offset + 2), (offset, offset + 2, offset + 3)))
+    return vertices, np.asarray(faces, dtype=np.int64)
+
+
+def _line_coordinates(segments: Iterable[np.ndarray]) -> tuple[list[float | None], ...]:
+    x_values: list[float | None] = []
+    y_values: list[float | None] = []
+    z_values: list[float | None] = []
+    for segment in segments:
+        for point in segment:
+            x_values.append(float(point[0]))
+            y_values.append(float(point[1]))
+            z_values.append(float(point[2]))
+        x_values.append(None)
+        y_values.append(None)
+        z_values.append(None)
+    return x_values, y_values, z_values
+
+
+def render_interactive_html(
+    records: Iterable[ZeroPlaneRecord],
+    organ_meshes: Mapping[str, Any],
+    output_path: str | Path,
+) -> None:
+    """生成内嵌 Plotly 的离线三维交互页面。"""
+
+    import plotly.graph_objects as go
+    import plotly.io as pio
+
+    values = list(records)
+    if not values:
+        raise ValueError("不能渲染空的零度面记录")
+    organs = list(dict.fromkeys(record.organ for record in values))
+    if set(organ_meshes) != set(organs):
+        raise ValueError("器官网格集合必须与零度面器官集合完全一致")
+
+    figure = go.Figure()
+    roles: list[str] = []
+    axis_styles = (
+        ("x", (214, 39, 40)),
+        ("y", (44, 160, 44)),
+        ("z", (31, 119, 180)),
+    )
+    for organ_index, organ in enumerate(organs):
+        organ_records = [record for record in values if record.organ == organ]
+        color = _color(organ)
+        vertices, faces = _mesh_arrays(organ_meshes[organ], 12_000, organ_index + 20260815)
+        figure.add_trace(
+            go.Mesh3d(
+                x=vertices[:, 0],
+                y=vertices[:, 1],
+                z=vertices[:, 2],
+                i=faces[:, 0],
+                j=faces[:, 1],
+                k=faces[:, 2],
+                name=f"{organ} organ",
+                legendgroup=organ,
+                legendgrouptitle_text=organ,
+                color=_css_color(color),
+                opacity=0.12,
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
+        roles.append("organ_mesh")
+
+        probes = np.asarray([record.probe for record in organ_records])
+        hover = [
+            f"{record.slice_id}<br>RAS: {record.probe[0]:.2f}, {record.probe[1]:.2f}, {record.probe[2]:.2f} mm"
+            for record in organ_records
+        ]
+        figure.add_trace(
+            go.Scatter3d(
+                x=probes[:, 0],
+                y=probes[:, 1],
+                z=probes[:, 2],
+                mode="markers",
+                marker={"size": 4.5, "color": _css_color(color), "line": {"width": 0.5, "color": "black"}},
+                text=hover,
+                hovertemplate="%{text}<extra></extra>",
+                name=f"{organ} sample points",
+                legendgroup=organ,
+                showlegend=True,
+            )
+        )
+        roles.append("points")
+
+        plane_vertices, plane_faces = _plane_mesh(organ_records)
+        figure.add_trace(
+            go.Mesh3d(
+                x=plane_vertices[:, 0],
+                y=plane_vertices[:, 1],
+                z=plane_vertices[:, 2],
+                i=plane_faces[:, 0],
+                j=plane_faces[:, 1],
+                k=plane_faces[:, 2],
+                name=f"{organ} zero planes",
+                legendgroup=organ,
+                color=_css_color(color),
+                opacity=0.055,
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
+        roles.append("planes")
+
+        edges = [
+            record.vertices[[first, second]]
+            for record in organ_records
+            for first, second in ((0, 1), (1, 2), (2, 3), (3, 0))
+        ]
+        edge_x, edge_y, edge_z = _line_coordinates(edges)
+        figure.add_trace(
+            go.Scatter3d(
+                x=edge_x,
+                y=edge_y,
+                z=edge_z,
+                mode="lines",
+                line={"color": _css_color(color), "width": 1.2},
+                opacity=0.32,
+                hoverinfo="skip",
+                legendgroup=organ,
+                showlegend=False,
+            )
+        )
+        roles.append("planes")
+
+        for axis_name, axis_color in axis_styles:
+            segments = []
+            for record in organ_records:
+                axis = getattr(record, f"{axis_name}_axis")
+                segments.append(np.vstack((record.probe, record.probe + axis * 8.0)))
+            axis_x, axis_y, axis_z = _line_coordinates(segments)
+            figure.add_trace(
+                go.Scatter3d(
+                    x=axis_x,
+                    y=axis_y,
+                    z=axis_z,
+                    mode="lines",
+                    line={"color": _css_color(axis_color), "width": 2.0},
+                    opacity=0.65,
+                    hoverinfo="skip",
+                    legendgroup=organ,
+                    showlegend=False,
+                )
+            )
+            roles.append("axes")
+
+    def visibility(visible_roles: set[str]) -> list[bool]:
+        return [role in visible_roles for role in roles]
+
+    buttons = [
+        ("All", {"organ_mesh", "points", "planes", "axes"}),
+        ("Points only", {"points"}),
+        ("Points + zero planes", {"points", "planes", "axes"}),
+        ("Hide organ meshes", {"points", "planes", "axes"}),
+    ]
+    figure.update_layout(
+        title={"text": "Case 2 Sampling Points And Zero-Degree Reference Planes", "x": 0.5},
+        template="plotly_white",
+        margin={"l": 0, "r": 0, "t": 70, "b": 0},
+        scene={
+            "aspectmode": "data",
+            "xaxis_title": "R (+) / L (-) [mm]",
+            "yaxis_title": "A (+) / P (-) [mm]",
+            "zaxis_title": "S (+) / I (-) [mm]",
+            "camera": {"eye": {"x": 1.45, "y": -1.55, "z": 1.05}},
+        },
+        legend={"groupclick": "togglegroup", "itemsizing": "constant"},
+        updatemenus=[
+            {
+                "type": "buttons",
+                "direction": "right",
+                "x": 0.01,
+                "y": 1.08,
+                "buttons": [
+                    {"label": label, "method": "update", "args": [{"visible": visibility(role_set)}]}
+                    for label, role_set in buttons
+                ],
+            }
+        ],
+    )
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    try:
+        pio.write_html(
+            figure,
+            file=str(temporary),
+            include_plotlyjs=True,
+            full_html=True,
+            auto_open=False,
+            config={"displaylogo": False, "responsive": True},
+        )
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _world_bounds(
+    records: list[ZeroPlaneRecord], organ_meshes: Mapping[str, Any]
+) -> tuple[np.ndarray, np.ndarray]:
+    arrays = [np.concatenate([record.vertices for record in records], axis=0)]
+    arrays.extend(np.asarray(mesh.vertices, dtype=np.float64) for mesh in organ_meshes.values())
+    all_points = np.concatenate(arrays, axis=0)
+    lower = np.min(all_points, axis=0)
+    upper = np.max(all_points, axis=0)
+    center = (lower + upper) / 2.0
+    radius = float(np.max(upper - lower)) / 2.0
+    return center - radius, center + radius
+
+
+def render_static_views(
+    records: Iterable[ZeroPlaneRecord],
+    organ_meshes: Mapping[str, Any],
+    output_directory: str | Path,
+) -> None:
+    """生成共享世界坐标范围的等距、轴位、冠状位和矢状位 PNG。"""
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+    values = list(records)
+    if not values:
+        raise ValueError("不能渲染空的零度面记录")
+    organs = list(dict.fromkeys(record.organ for record in values))
+    if set(organ_meshes) != set(organs):
+        raise ValueError("器官网格集合必须与零度面器官集合完全一致")
+    lower, upper = _world_bounds(values, organ_meshes)
+    views = {
+        "isometric": (25.0, -55.0),
+        "axial": (90.0, -90.0),
+        "coronal": (0.0, -90.0),
+        "sagittal": (0.0, 0.0),
+    }
+    destination = Path(output_directory)
+    destination.mkdir(parents=True, exist_ok=True)
+    for view_name, (elevation, azimuth) in views.items():
+        figure = plt.figure(figsize=(12, 9), dpi=140, facecolor="white")
+        axis = figure.add_subplot(111, projection="3d")
+        for organ_index, organ in enumerate(organs):
+            color = np.asarray(_color(organ), dtype=np.float64) / 255.0
+            mesh_vertices, mesh_faces = _mesh_arrays(
+                organ_meshes[organ], 5_000, organ_index + 20260815
+            )
+            axis.add_collection3d(
+                Poly3DCollection(
+                    mesh_vertices[mesh_faces],
+                    facecolors=[(*color, 0.075)],
+                    edgecolors="none",
+                )
+            )
+            organ_records = [record for record in values if record.organ == organ]
+            axis.add_collection3d(
+                Poly3DCollection(
+                    [record.vertices for record in organ_records],
+                    facecolors=[(*color, 0.022)],
+                    edgecolors=[(*color, 0.16)],
+                    linewidths=0.35,
+                )
+            )
+            probes = np.asarray([record.probe for record in organ_records])
+            axis.scatter(
+                probes[:, 0],
+                probes[:, 1],
+                probes[:, 2],
+                s=14,
+                c=[color],
+                edgecolors="black",
+                linewidths=0.25,
+                depthshade=False,
+            )
+            for axis_name, axis_color in (
+                ("x", (0.84, 0.15, 0.16, 0.38)),
+                ("y", (0.17, 0.63, 0.17, 0.38)),
+                ("z", (0.12, 0.47, 0.71, 0.38)),
+            ):
+                segments = [
+                    np.vstack(
+                        (
+                            record.probe,
+                            record.probe + getattr(record, f"{axis_name}_axis") * 8.0,
+                        )
+                    )
+                    for record in organ_records
+                ]
+                axis.add_collection3d(
+                    Line3DCollection(segments, colors=[axis_color], linewidths=0.55)
+                )
+
+        axis.set_xlim(float(lower[0]), float(upper[0]))
+        axis.set_ylim(float(lower[1]), float(upper[1]))
+        axis.set_zlim(float(lower[2]), float(upper[2]))
+        axis.set_box_aspect((1.0, 1.0, 1.0))
+        axis.view_init(elev=elevation, azim=azimuth)
+        axis.set_xlabel("R (+) / L (-) [mm]")
+        axis.set_ylabel("A (+) / P (-) [mm]")
+        axis.set_zlabel("S (+) / I (-) [mm]")
+        axis.set_title(f"Sampling Points And Zero-Degree Planes — {view_name.title()}")
+        handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markerfacecolor=np.asarray(_color(organ)) / 255.0,
+                markeredgecolor="black",
+                markersize=7,
+                label=organ,
+            )
+            for organ in organs
+        ]
+        axis.legend(handles=handles, loc="upper right", framealpha=0.92)
+        axis.grid(True, linewidth=0.35, alpha=0.35)
+        figure.tight_layout()
+        output = destination / f"sampling_points_zero_planes_{view_name}.png"
+        temporary = output.with_name(f".{output.name}.tmp.png")
+        try:
+            figure.savefig(temporary, format="png", bbox_inches="tight", facecolor="white")
+            os.replace(temporary, output)
+        finally:
+            plt.close(figure)
+            temporary.unlink(missing_ok=True)
