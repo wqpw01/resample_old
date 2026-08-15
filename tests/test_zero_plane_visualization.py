@@ -13,6 +13,7 @@ import pytest
 import trimesh
 
 from ct_vascular_resampling.zero_plane_visualization import (
+    project_orthographic,
     render_interactive_html,
     render_static_views,
     select_zero_planes,
@@ -206,6 +207,23 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
         assert pixels.shape[0] >= 600
         assert pixels.shape[1] >= 800
         assert float(pixels.std()) > 0.0
+
+
+@pytest.mark.parametrize(
+    ("view", "expected", "labels"),
+    [
+        ("axial", [[1.0, 2.0], [4.0, 5.0]], ("R (+) / L (-) [mm]", "A (+) / P (-) [mm]")),
+        ("coronal", [[1.0, 3.0], [4.0, 6.0]], ("R (+) / L (-) [mm]", "S (+) / I (-) [mm]")),
+        ("sagittal", [[2.0, 3.0], [5.0, 6.0]], ("A (+) / P (-) [mm]", "S (+) / I (-) [mm]")),
+    ],
+)
+def test_project_orthographic_uses_two_patient_axes(view, expected, labels):
+    projected, x_label, y_label = project_orthographic(
+        np.asarray([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), view
+    )
+
+    assert np.array_equal(projected, np.asarray(expected))
+    assert (x_label, y_label) == labels
 
 
 TARGET_COUNTS = {

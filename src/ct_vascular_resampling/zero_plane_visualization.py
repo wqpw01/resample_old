@@ -650,6 +650,26 @@ def _world_bounds(
     return center - radius, center + radius
 
 
+def project_orthographic(
+    points: np.ndarray, view: str
+) -> tuple[np.ndarray, str, str]:
+    """把 RAS 世界坐标投影到指定的患者正交平面。"""
+
+    values = np.asarray(points, dtype=np.float64)
+    if values.ndim < 2 or values.shape[-1] != 3 or not np.all(np.isfinite(values)):
+        raise ValueError("正交投影输入必须是末维为 3 的有限坐标")
+    definitions = {
+        "axial": ((0, 1), "R (+) / L (-) [mm]", "A (+) / P (-) [mm]"),
+        "coronal": ((0, 2), "R (+) / L (-) [mm]", "S (+) / I (-) [mm]"),
+        "sagittal": ((1, 2), "A (+) / P (-) [mm]", "S (+) / I (-) [mm]"),
+    }
+    try:
+        dimensions, x_label, y_label = definitions[view]
+    except KeyError as error:
+        raise ValueError(f"不支持的正交视图: {view}") from error
+    return values[..., list(dimensions)], x_label, y_label
+
+
 def render_static_views(
     records: Iterable[ZeroPlaneRecord],
     organ_meshes: Mapping[str, Any],
@@ -661,8 +681,10 @@ def render_static_views(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection, PolyCollection
     from matplotlib.lines import Line2D
     from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+
     values = list(records)
     if not values:
         raise ValueError("不能渲染空的零度面记录")
@@ -670,75 +692,140 @@ def render_static_views(
     if set(organ_meshes) != set(organs):
         raise ValueError("器官网格集合必须与零度面器官集合完全一致")
     lower, upper = _world_bounds(values, organ_meshes)
-    views = {
-        "isometric": (25.0, -55.0),
-        "axial": (90.0, -90.0),
-        "coronal": (0.0, -90.0),
-        "sagittal": (0.0, 0.0),
-    }
     destination = Path(output_directory)
     destination.mkdir(parents=True, exist_ok=True)
-    for view_name, (elevation, azimuth) in views.items():
-        figure = plt.figure(figsize=(12, 9), dpi=140, facecolor="white")
-        axis = figure.add_subplot(111, projection="3d")
-        for organ_index, organ in enumerate(organs):
-            color = np.asarray(_color(organ), dtype=np.float64) / 255.0
-            mesh_vertices, mesh_faces = _mesh_arrays(
-                organ_meshes[organ], 5_000, organ_index + 20260815
-            )
-            axis.add_collection3d(
-                Poly3DCollection(
-                    mesh_vertices[mesh_faces],
-                    facecolors=[(*color, 0.075)],
-                    edgecolors="none",
-                )
-            )
-            organ_records = [record for record in values if record.organ == organ]
-            axis.add_collection3d(
-                Poly3DCollection(
-                    [record.vertices for record in organ_records],
-                    facecolors=[(*color, 0.022)],
-                    edgecolors=[(*color, 0.16)],
-                    linewidths=0.35,
-                )
-            )
-            probes = np.asarray([record.probe for record in organ_records])
-            axis.scatter(
-                probes[:, 0],
-                probes[:, 1],
-                probes[:, 2],
-                s=14,
-                c=[color],
-                edgecolors="black",
-                linewidths=0.25,
-                depthshade=False,
-            )
-            for axis_name, axis_color in (
-                ("x", (0.84, 0.15, 0.16, 0.38)),
-                ("y", (0.17, 0.63, 0.17, 0.38)),
-                ("z", (0.12, 0.47, 0.71, 0.38)),
-            ):
-                segments = [
-                    np.vstack(
-                        (
-                            record.probe,
-                            record.probe + getattr(record, f"{axis_name}_axis") * 8.0,
-                        )
-                    )
-                    for record in organ_records
-                ]
-                axis.add_collection3d(
-                    Line3DCollection(segments, colors=[axis_color], linewidths=0.55)
-                )
 
-        axis.set_xlim(float(lower[0]), float(upper[0]))
-        axis.set_ylim(float(lower[1]), float(upper[1]))
-        axis.set_zlim(float(lower[2]), float(upper[2]))
-        axis.set_box_aspect((1.0, 1.0, 1.0))
-        axis.view_init(elev=elevation, azim=azimuth)
-        axis.set_xlabel("R (+) / L (-) [mm]")
-        axis.set_ylabel("A (+) / P (-) [mm]")
-        axis.set_zlabel("S (+) / I (-) [mm]")
+    for view_name in ("isometric", "axial", "coronal", "sagittal"):
+        figure = plt.figure(figsize=(12, 9), dpi=140, facecolor="white")
+        if view_name == "isometric":
+            axis = figure.add_subplot(111, projection="3d")
+            for organ_index, organ in enumerate(organs):
+                color = np.asarray(_color(organ), dtype=np.float64) / 255.0
+                mesh_vertices, mesh_faces = _mesh_arrays(
+                    organ_meshes[organ], 5_000, organ_index + 20260815
+                )
+                axis.add_collection3d(
+                    Poly3DCollection(
+                        mesh_vertices[mesh_faces],
+                        facecolors=[(*color, 0.075)],
+                        edgecolors="none",
+                    )
+                )
+                organ_records = [record for record in values if record.organ == organ]
+                axis.add_collection3d(
+                    Poly3DCollection(
+                        [record.vertices for record in organ_records],
+                        facecolors=[(*color, 0.022)],
+                        edgecolors=[(*color, 0.16)],
+                        linewidths=0.35,
+                    )
+                )
+                probes = np.asarray([record.probe for record in organ_records])
+                axis.scatter(
+                    probes[:, 0],
+                    probes[:, 1],
+                    probes[:, 2],
+                    s=14,
+                    c=[color],
+                    edgecolors="black",
+                    linewidths=0.25,
+                    depthshade=False,
+                )
+                for axis_name, axis_color in (
+                    ("x", (0.84, 0.15, 0.16, 0.38)),
+                    ("y", (0.17, 0.63, 0.17, 0.38)),
+                    ("z", (0.12, 0.47, 0.71, 0.38)),
+                ):
+                    segments = [
+                        np.vstack(
+                            (
+                                record.probe,
+                                record.probe + getattr(record, f"{axis_name}_axis") * 8.0,
+                            )
+                        )
+                        for record in organ_records
+                    ]
+                    axis.add_collection3d(
+                        Line3DCollection(segments, colors=[axis_color], linewidths=0.55)
+                    )
+            axis.set_xlim(float(lower[0]), float(upper[0]))
+            axis.set_ylim(float(lower[1]), float(upper[1]))
+            axis.set_zlim(float(lower[2]), float(upper[2]))
+            axis.set_box_aspect((1.0, 1.0, 1.0))
+            axis.view_init(elev=25.0, azim=-55.0)
+            axis.set_xlabel("R (+) / L (-) [mm]")
+            axis.set_ylabel("A (+) / P (-) [mm]")
+            axis.set_zlabel("S (+) / I (-) [mm]")
+            axis.grid(True, linewidth=0.35, alpha=0.35)
+        else:
+            axis = figure.add_subplot(111)
+            for organ_index, organ in enumerate(organs):
+                color = np.asarray(_color(organ), dtype=np.float64) / 255.0
+                mesh_vertices, mesh_faces = _mesh_arrays(
+                    organ_meshes[organ], 5_000, organ_index + 20260815
+                )
+                projected_mesh, x_label, y_label = project_orthographic(
+                    mesh_vertices[mesh_faces], view_name
+                )
+                axis.add_collection(
+                    PolyCollection(
+                        projected_mesh,
+                        facecolors=[(*color, 0.075)],
+                        edgecolors="none",
+                    )
+                )
+                organ_records = [record for record in values if record.organ == organ]
+                projected_planes, _, _ = project_orthographic(
+                    np.asarray([record.vertices for record in organ_records]), view_name
+                )
+                axis.add_collection(
+                    PolyCollection(
+                        projected_planes,
+                        facecolors=[(*color, 0.022)],
+                        edgecolors=[(*color, 0.16)],
+                        linewidths=0.35,
+                    )
+                )
+                probes, _, _ = project_orthographic(
+                    np.asarray([record.probe for record in organ_records]), view_name
+                )
+                axis.scatter(
+                    probes[:, 0],
+                    probes[:, 1],
+                    s=14,
+                    c=[color],
+                    edgecolors="black",
+                    linewidths=0.25,
+                    zorder=4,
+                )
+                for axis_name, axis_color in (
+                    ("x", (0.84, 0.15, 0.16, 0.38)),
+                    ("y", (0.17, 0.63, 0.17, 0.38)),
+                    ("z", (0.12, 0.47, 0.71, 0.38)),
+                ):
+                    segments = np.asarray(
+                        [
+                            [
+                                record.probe,
+                                record.probe + getattr(record, f"{axis_name}_axis") * 8.0,
+                            ]
+                            for record in organ_records
+                        ]
+                    )
+                    projected_segments, _, _ = project_orthographic(segments, view_name)
+                    axis.add_collection(
+                        LineCollection(projected_segments, colors=[axis_color], linewidths=0.55)
+                    )
+            projected_limits, x_label, y_label = project_orthographic(
+                np.vstack((lower, upper)), view_name
+            )
+            axis.set_xlim(float(projected_limits[0, 0]), float(projected_limits[1, 0]))
+            axis.set_ylim(float(projected_limits[0, 1]), float(projected_limits[1, 1]))
+            axis.set_aspect("equal", adjustable="box")
+            axis.set_xlabel(x_label)
+            axis.set_ylabel(y_label)
+            axis.grid(True, linewidth=0.45, alpha=0.35)
+
         axis.set_title(f"Sampling Points And Zero-Degree Planes — {view_name.title()}")
         handles = [
             Line2D(
@@ -754,7 +841,6 @@ def render_static_views(
             for organ in organs
         ]
         axis.legend(handles=handles, loc="upper right", framealpha=0.92)
-        axis.grid(True, linewidth=0.35, alpha=0.35)
         figure.tight_layout()
         output = destination / f"sampling_points_zero_planes_{view_name}.png"
         temporary = output.with_name(f".{output.name}.tmp.png")
