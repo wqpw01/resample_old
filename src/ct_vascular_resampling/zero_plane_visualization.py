@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 from typing import Any
+import hashlib
 
 import numpy as np
 
@@ -25,6 +27,22 @@ ORGAN_COLORS: dict[str, tuple[int, int, int]] = {
     "pancreas": (242, 207, 91),
     "duodenum": (84, 162, 75),
     "esophagus": (178, 121, 162),
+}
+
+TARGET_ORGAN_COUNTS: dict[str, int] = {
+    "stomach": 118,
+    "liver": 162,
+    "pancreas": 37,
+    "duodenum": 53,
+    "esophagus": 30,
+}
+
+LEGACY_ORGAN_NAMES: dict[str, str] = {
+    "stomach": "Stomach",
+    "liver": "Liver",
+    "pancreas": "Pancreas",
+    "duodenum": "Duodenum",
+    "esophagus": "Esophagus",
 }
 
 
@@ -746,3 +764,243 @@ def render_static_views(
         finally:
             plt.close(figure)
             temporary.unlink(missing_ok=True)
+
+
+def load_zero_record_jsonl(path: str | Path) -> list[dict[str, object]]:
+    """读取服务器端已经筛选好的零度记录 JSONL。"""
+
+    source = Path(path)
+    records: list[dict[str, object]] = []
+    try:
+        with source.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f"第 {line_number} 行不是 JSON 对象")
+                records.append(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"零度记录 JSONL 第 {error.lineno} 行损坏: {error.msg}") from error
+    if not records:
+        raise ValueError("零度记录 JSONL 为空")
+    return records
+
+
+def read_surface_samples_ply(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
+    """读取旧流程 FPS ASCII PLY 中的点和法向量。"""
+
+    source = Path(path)
+    with source.open(encoding="utf-8") as stream:
+        if stream.readline().strip() != "ply" or stream.readline().strip() != "format ascii 1.0":
+            raise ValueError(f"{source} 不是 ASCII PLY 1.0")
+        vertex_count: int | None = None
+        properties: list[str] = []
+        in_vertex = False
+        for raw_line in stream:
+            line = raw_line.strip()
+            if line == "end_header":
+                break
+            if line.startswith("element "):
+                parts = line.split()
+                in_vertex = len(parts) == 3 and parts[1] == "vertex"
+                if in_vertex:
+                    vertex_count = int(parts[2])
+            elif in_vertex and line.startswith("property "):
+                parts = line.split()
+                if len(parts) != 3:
+                    raise ValueError(f"{source} 的 vertex property 无效")
+                properties.append(parts[2])
+        else:
+            raise ValueError(f"{source} 缺少 end_header")
+        required = ("x", "y", "z", "nx", "ny", "nz")
+        if vertex_count is None or any(name not in properties for name in required):
+            raise ValueError(f"{source} 缺少点数或 xyz/nxyz 属性")
+        indices = [properties.index(name) for name in required]
+        values: list[list[float]] = []
+        for row_index in range(vertex_count):
+            line = stream.readline()
+            if not line:
+                raise ValueError(f"{source} 的顶点数据少于声明的 {vertex_count} 行")
+            parts = line.split()
+            if len(parts) < len(properties):
+                raise ValueError(f"{source} 第 {row_index + 1} 个顶点字段不足")
+            values.append([float(parts[index]) for index in indices])
+    array = np.asarray(values, dtype=np.float64)
+    if array.shape != (vertex_count, 6) or not np.all(np.isfinite(array)):
+        raise ValueError(f"{source} 包含无效点或法向量")
+    return array[:, :3], array[:, 3:]
+
+
+def _validate_surface_samples(
+    records: list[ZeroPlaneRecord], sample_ply_directory: Path
+) -> None:
+    for organ in TARGET_ORGAN_COUNTS:
+        organ_records = [record for record in records if record.organ == organ]
+        source = sample_ply_directory / f"FPS-{LEGACY_ORGAN_NAMES[organ]}.ply"
+        if not source.is_file():
+            raise ValueError(f"缺少采样点 PLY: {source}")
+        points, normals = read_surface_samples_ply(source)
+        expected_points = np.asarray([record.probe for record in organ_records])
+        expected_normals = np.asarray([record.input_normal for record in organ_records])
+        if points.shape != expected_points.shape or not np.allclose(
+            points, expected_points, rtol=0.0, atol=POINT_TOLERANCE_MM
+        ):
+            raise ValueError(f"{organ} 的 FPS 点与零度记录不一致")
+        if normals.shape != expected_normals.shape or not np.allclose(
+            normals, expected_normals, rtol=0.0, atol=POINT_TOLERANCE_MM
+        ):
+            raise ValueError(f"{organ} 的 FPS 法向量与零度记录不一致")
+
+
+def _load_organ_meshes(directory: Path) -> dict[str, Any]:
+    import trimesh
+
+    meshes: dict[str, Any] = {}
+    for organ in TARGET_ORGAN_COUNTS:
+        source = directory / f"{organ}.ply"
+        if not source.is_file():
+            raise ValueError(f"缺少目标器官网格: {source}")
+        loaded = trimesh.load(source, process=False, force="mesh")
+        if not isinstance(loaded, trimesh.Trimesh) or loaded.is_empty:
+            raise ValueError(f"目标器官网格无效: {source}")
+        _mesh_arrays(loaded, max(1, len(loaded.faces)), 0)
+        meshes[organ] = loaded
+    return meshes
+
+
+def _read_run_metadata(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取 run_metadata.json: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError("run_metadata.json 顶层必须是对象")
+    if value.get("run_state") != "complete":
+        raise ValueError("run_metadata.run_state 不是 complete")
+    if value.get("total_squares") != 1_431_118:
+        raise ValueError("run_metadata.total_squares 不是 1431118")
+    return value
+
+
+def _readme_text(
+    records: list[ZeroPlaneRecord], provenance: Mapping[str, str]
+) -> str:
+    counts = Counter(record.organ for record in records)
+    color_lines = [
+        f"- {organ}: {counts[organ]} 个，RGB {list(_color(organ))}"
+        for organ in TARGET_ORGAN_COUNTS
+    ]
+    return "\n".join(
+        [
+            "病例 2 采样点与零度基准面可视化",
+            "=================================",
+            "",
+            "坐标与几何",
+            "----------",
+            "- 坐标系：RAS 患者世界坐标；单位：毫米。",
+            "- 零度面直接来自正式 manifest 中 roll=0、pitch=0、yaw=0 的记录。",
+            "- 每个切面为 100 mm x 100 mm；探头/采样点位于方形底边中点。",
+            "- 局部 +x 指向切面深度，+y 沿底边，+z=x×y，满足右手关系。",
+            "- squarePLY 与 rectangles.ply 包含全旋转切面，本交付未将其误作零度面。",
+            "",
+            "器官颜色与数量",
+            "--------------",
+            *color_lines,
+            "",
+            "文件说明",
+            "--------",
+            "- sampling_points_zero_planes_interactive.html：离线交互三维视图。",
+            "- sampling_points_zero_planes_*.png：等距、轴位、冠状位和矢状位视图。",
+            "- sampling_points.ply：400 个采样点，含输入法向量、RGB 和器官编号。",
+            "- zero_planes_edges.ply：400 个零度面的边框。",
+            "- zero_planes_faces.ply：400 个零度面的四边形面。",
+            "- sampling_points_zero_planes.csv/json：完整点、局部轴和四顶点数据。",
+            "- target_organ_meshes：五个目标器官网格，作为空间参照。",
+            "",
+            "打开方式",
+            "--------",
+            "- HTML 可直接用浏览器离线打开；右上角图例可按器官显隐。",
+            "- PLY 可在 3D Slicer、MeshLab 或 CloudCompare 中打开。",
+            "- 在 3D Slicer 中必须保持 RAS 世界坐标，不要自动居中各个文件。",
+            "",
+            "来源追溯",
+            "--------",
+            f"- 根 manifest SHA-256：{provenance['source_manifest_sha256']}",
+            f"- 核心设计 SHA-256：{provenance['core_design_sha256']}",
+            f"- 生成重采样结果的 Git commit：{provenance['build_git_commit']}",
+            "",
+        ]
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _write_sha256_manifest(directory: Path) -> None:
+    output = directory / "SHA256SUMS.txt"
+    lines = [
+        f"{_sha256_file(path)}  {path.relative_to(directory).as_posix()}"
+        for path in sorted(directory.rglob("*"))
+        if path.is_file() and path != output
+    ]
+    _atomic_text(output, "\n".join(lines) + "\n")
+
+
+def export_visualization_bundle(
+    *,
+    zero_records_jsonl: str | Path,
+    sample_ply_directory: str | Path,
+    organ_mesh_directory: str | Path,
+    run_metadata_path: str | Path,
+    source_manifest_sha256: str,
+    output_directory: str | Path,
+) -> dict[str, object]:
+    """验证正式结果输入并一次性发布完整本地可视化交付目录。"""
+
+    destination = Path(output_directory).resolve()
+    if destination.exists():
+        raise ValueError(f"输出目录已经存在，为避免覆盖请先确认: {destination}")
+    staging = destination.with_name(f".{destination.name}.tmp.{os.getpid()}")
+    if staging.exists():
+        shutil.rmtree(staging)
+    try:
+        raw_records = load_zero_record_jsonl(zero_records_jsonl)
+        records = select_zero_planes(raw_records, TARGET_ORGAN_COUNTS)
+        _validate_surface_samples(records, Path(sample_ply_directory))
+        metadata = _read_run_metadata(Path(run_metadata_path))
+        provenance = _validate_provenance(
+            {
+                "source_manifest_sha256": source_manifest_sha256,
+                "core_design_sha256": metadata.get("core_design_sha256"),
+                "build_git_commit": metadata.get("build_git_commit"),
+            }
+        )
+        meshes = _load_organ_meshes(Path(organ_mesh_directory))
+        staging.mkdir(parents=True)
+        write_structured_exports(records, staging, provenance)
+        render_interactive_html(
+            records, meshes, staging / "sampling_points_zero_planes_interactive.html"
+        )
+        render_static_views(records, meshes, staging)
+        mesh_output = staging / "target_organ_meshes"
+        mesh_output.mkdir()
+        for organ in TARGET_ORGAN_COUNTS:
+            shutil.copy2(Path(organ_mesh_directory) / f"{organ}.ply", mesh_output / f"{organ}.ply")
+        _atomic_text(staging / "README_中文.txt", _readme_text(records, provenance))
+        _write_sha256_manifest(staging)
+        os.replace(staging, destination)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return {
+        "output_directory": str(destination),
+        "record_count": len(records),
+        "organ_counts": dict(TARGET_ORGAN_COUNTS),
+        "source_manifest_sha256": provenance["source_manifest_sha256"],
+    }

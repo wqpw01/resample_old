@@ -127,6 +127,22 @@ The 20260813 core design uses roll `-45..+45 degrees` and pitch `-30..+30 degree
 
 历史旧角度证据：2026-08-07 在当时滚动/俯仰均为 `-5/0/+5` 度的合同下，使用导出的 case 2 真实器官网格只读验收得到 319 个采样点和 43,695 个姿态，其中普通 33,345、胰腺特殊 5,022、十二指肠球部 5,328；85 个肝点的来源为一区 33、一区/二区重叠 12、二区 40。病例 2 的完整十二指肠骨架为 190 节点/189 边的单连通树；用户按三平面可视化确认 E1 `[19, 24, 700]` 到 E2 `[-33, 1, 664]` 为主路径，选中 166 点、长度 224.7411 mm。以上仅是 2026-08-07 旧角度合同下本次输入与实现的历史验收结果，不是当前姿态数量、其他病例的固定数量或核心 DOCX 原文参数。
 
+### 采样点与零度面可视化
+
+正式建库完成后，可从根 `manifest.jsonl` 在服务器端流式筛选 `roll=0`、`pitch=0`、`yaw=0` 的记录。只把筛选结果、`ResampledpointPLY/FPS-*.ply`、`run_metadata.json` 和五个目标器官 PLY 传到本地，不下载完整根清单。随后运行：
+
+```bash
+python scripts/export_zero_plane_visualization.py \
+  --zero-records-jsonl /path/to/zero_records.jsonl \
+  --sample-ply-dir /path/to/ResampledpointPLY \
+  --organ-mesh-dir /path/to/target_organ_meshes \
+  --run-metadata /path/to/run_metadata.json \
+  --source-manifest-sha256 <manifest-sha256> \
+  --output-dir /path/to/visualization-delivery
+```
+
+该命令专用于病例 2 正式 20260813 输出，会强制验证胃 118、肝 162、胰腺 37、十二指肠 53、食管 30，共 400 个零度面；同时核对 FPS 点/法向量、100 mm 正方形、探头底边中点和 RAS 右手局部轴。输出包含离线交互 HTML、四视图 PNG、点/边/面 PLY、CSV、JSON、五个器官网格、中文说明及 SHA-256 清单。输出目录必须不存在，避免覆盖既有交付物。
+
 `gallery/` 仅包含具备完整血管截面特征的可检索样本，支持 portal/hepatic 或 artery/vein 标签对；`unindexed/` 保留无血管截面的合格图像；`rejected/` 保留黑色区域或直线黑边不合格样本。使用 `ct_vascular_resampling.registration_adapter.load_gallery_database()` 可将 `gallery.jsonl` 载入外部 `2021.py` CBIR 实现。
 
 ## Rejected FOV 审计

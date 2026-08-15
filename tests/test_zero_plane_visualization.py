@@ -3,6 +3,9 @@ from __future__ import annotations
 import csv
 from copy import deepcopy
 import json
+from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 from PIL import Image
@@ -203,3 +206,131 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
         assert pixels.shape[0] >= 600
         assert pixels.shape[1] >= 800
         assert float(pixels.std()) > 0.0
+
+
+TARGET_COUNTS = {
+    "stomach": 118,
+    "liver": 162,
+    "pancreas": 37,
+    "duodenum": 53,
+    "esophagus": 30,
+}
+
+LEGACY_NAMES = {
+    "stomach": "Stomach",
+    "liver": "Liver",
+    "pancreas": "Pancreas",
+    "duodenum": "Duodenum",
+    "esophagus": "Esophagus",
+}
+
+
+def _shifted_record(organ: str, index: int, z_offset: float) -> dict:
+    record = _record(index, organ=organ)
+    shift = np.asarray([0.0, 0.0, z_offset])
+    record["probe_point_world"] = shift.tolist()
+    record["square_vertices_world"] = (
+        np.asarray(record["square_vertices_world"]) + shift
+    ).tolist()
+    return record
+
+
+def _write_surface_ply(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(records)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property float nx",
+        "property float ny",
+        "property float nz",
+        "end_header",
+    ]
+    for record in records:
+        values = record["probe_point_world"] + record["input_normal_world"]
+        lines.append(" ".join(str(value) for value in values))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_cli_exports_complete_case2_bundle(tmp_path):
+    inputs = tmp_path / "input"
+    samples = inputs / "ResampledpointPLY"
+    meshes = inputs / "target_organ_meshes"
+    all_records: list[dict] = []
+    global_index = 0
+    for organ, count in TARGET_COUNTS.items():
+        organ_records = []
+        for point_index in range(count):
+            record = _shifted_record(organ, point_index, float(global_index) * 0.25)
+            organ_records.append(record)
+            all_records.append(record)
+            global_index += 1
+        _write_surface_ply(samples / f"FPS-{LEGACY_NAMES[organ]}.ply", organ_records)
+        mesh = trimesh.creation.box(extents=(20.0, 20.0, 20.0))
+        meshes.mkdir(parents=True, exist_ok=True)
+        mesh.export(meshes / f"{organ}.ply")
+
+    zero_records = inputs / "zero_records.jsonl"
+    zero_records.write_text(
+        "".join(json.dumps(record) + "\n" for record in all_records),
+        encoding="utf-8",
+    )
+    run_metadata = inputs / "run_metadata.json"
+    run_metadata.write_text(
+        json.dumps(
+            {
+                "run_state": "complete",
+                "total_squares": 1431118,
+                "core_design_sha256": "b" * 64,
+                "build_git_commit": "c" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "delivery"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/export_zero_plane_visualization.py",
+            "--zero-records-jsonl",
+            str(zero_records),
+            "--sample-ply-dir",
+            str(samples),
+            "--organ-mesh-dir",
+            str(meshes),
+            "--run-metadata",
+            str(run_metadata),
+            "--source-manifest-sha256",
+            "a" * 64,
+            "--output-dir",
+            str(output),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["record_count"] == 400
+    expected_files = {
+        "sampling_points.ply",
+        "zero_planes_edges.ply",
+        "zero_planes_faces.ply",
+        "sampling_points_zero_planes.csv",
+        "sampling_points_zero_planes.json",
+        "sampling_points_zero_planes_interactive.html",
+        "sampling_points_zero_planes_isometric.png",
+        "sampling_points_zero_planes_axial.png",
+        "sampling_points_zero_planes_coronal.png",
+        "sampling_points_zero_planes_sagittal.png",
+        "README_中文.txt",
+        "SHA256SUMS.txt",
+    }
+    assert expected_files <= {path.name for path in output.iterdir() if path.is_file()}
+    assert len(list((output / "target_organ_meshes").glob("*.ply"))) == 5
+    assert not list(tmp_path.glob(".delivery.tmp*"))
