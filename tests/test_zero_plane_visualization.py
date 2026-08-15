@@ -205,6 +205,12 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
     assert visualization.INTERACTIVE_ORGAN_MESH_OPACITY == pytest.approx(0.22)
     assert visualization.STATIC_ORGAN_MESH_ALPHA == pytest.approx(0.14)
     assert '"opacity":0.22' in html
+    assert 'id="zero-plane-visualization"' in html
+    assert 'id="zero-plane-visibility-toggle"' in html
+    assert "显示 0° 基准面" in html
+    assert "const planeTraceIndices = [2,3];" in html
+    assert "plotly_buttonclicked" in html
+    assert "indeterminate" in html
     for name in ("isometric", "axial", "coronal", "sagittal"):
         path = tmp_path / f"sampling_points_zero_planes_{name}.png"
         with Image.open(path) as image:

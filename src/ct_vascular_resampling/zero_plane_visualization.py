@@ -24,6 +24,8 @@ POINT_TOLERANCE_MM = 1e-5
 AXIS_TOLERANCE = 1e-8
 INTERACTIVE_ORGAN_MESH_OPACITY = 0.22
 STATIC_ORGAN_MESH_ALPHA = 0.14
+INTERACTIVE_PLOT_DIV_ID = "zero-plane-visualization"
+ZERO_PLANE_TOGGLE_ID = "zero-plane-visibility-toggle"
 
 ORGAN_COLORS: dict[str, tuple[int, int, int]] = {
     "stomach": (228, 87, 86),
@@ -479,6 +481,104 @@ def _line_coordinates(segments: Iterable[np.ndarray]) -> tuple[list[float | None
     return x_values, y_values, z_values
 
 
+def _zero_plane_visibility_script(roles: list[str]) -> str:
+    plane_indices = [index for index, role in enumerate(roles) if role == "planes"]
+    if not plane_indices:
+        raise ValueError("交互可视化缺少零度基准面 trace")
+    indices_json = json.dumps(plane_indices, separators=(",", ":"))
+    plot_id_json = json.dumps(INTERACTIVE_PLOT_DIV_ID)
+    toggle_id_json = json.dumps(ZERO_PLANE_TOGGLE_ID)
+    return f"""
+(function() {{
+  const graph = document.getElementById({plot_id_json});
+  const checkbox = document.getElementById({toggle_id_json});
+  const planeTraceIndices = {indices_json};
+  if (!graph || !checkbox) {{
+    return;
+  }}
+
+  let zeroPlanesVisible = true;
+  const traceIsVisible = (index) => {{
+    const value = graph.data[index].visible;
+    return value !== false && value !== "legendonly";
+  }};
+  const syncToggleFromPlot = () => {{
+    const visibleCount = planeTraceIndices.filter(traceIsVisible).length;
+    checkbox.indeterminate = visibleCount > 0 && visibleCount < planeTraceIndices.length;
+    checkbox.checked = visibleCount === planeTraceIndices.length;
+  }};
+  const applyZeroPlaneState = () => {{
+    checkbox.indeterminate = false;
+    checkbox.checked = zeroPlanesVisible;
+    return Plotly.restyle(
+      graph,
+      {{visible: zeroPlanesVisible}},
+      planeTraceIndices
+    ).then(syncToggleFromPlot);
+  }};
+
+  checkbox.addEventListener("change", () => {{
+    zeroPlanesVisible = checkbox.checked;
+    applyZeroPlaneState();
+  }});
+  graph.on("plotly_buttonclicked", (event) => {{
+    const label = event && event.button ? event.button.label : "";
+    if (label === "Points only") {{
+      zeroPlanesVisible = false;
+    }} else if (label === "Points + zero planes") {{
+      zeroPlanesVisible = true;
+    }}
+    window.setTimeout(applyZeroPlaneState, 0);
+  }});
+  graph.on("plotly_restyle", () => window.requestAnimationFrame(syncToggleFromPlot));
+  graph.on("plotly_legendclick", () => window.setTimeout(syncToggleFromPlot, 0));
+  graph.on("plotly_legenddoubleclick", () => window.setTimeout(syncToggleFromPlot, 0));
+  syncToggleFromPlot();
+}})();
+"""
+
+
+def _interactive_html_document(plot_html: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {{ width: 100%; height: 100%; margin: 0; }}
+    .zero-plane-toggle-control {{
+      position: fixed;
+      top: 8px;
+      left: clamp(8px, 30vw, 445px);
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 3px 9px;
+      box-sizing: border-box;
+      border: 1px solid #b9c7da;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.96);
+      color: #243b5a;
+      font: 13px Arial, sans-serif;
+      white-space: nowrap;
+      cursor: pointer;
+    }}
+    .zero-plane-toggle-control input {{ margin: 0; }}
+  </style>
+</head>
+<body>
+  <label class="zero-plane-toggle-control" for="{ZERO_PLANE_TOGGLE_ID}">
+    <input id="{ZERO_PLANE_TOGGLE_ID}" type="checkbox" checked aria-label="显示 0° 基准面">
+    <span>显示 0° 基准面</span>
+  </label>
+  {plot_html}
+</body>
+</html>
+"""
+
+
 def render_interactive_html(
     records: Iterable[ZeroPlaneRecord],
     organ_meshes: Mapping[str, Any],
@@ -644,19 +744,16 @@ def render_interactive_html(
     )
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp")
-    try:
-        pio.write_html(
-            figure,
-            file=str(temporary),
-            include_plotlyjs=True,
-            full_html=True,
-            auto_open=False,
-            config={"displaylogo": False, "responsive": True},
-        )
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
+    plot_html = pio.to_html(
+        figure,
+        include_plotlyjs=True,
+        post_script=_zero_plane_visibility_script(roles),
+        full_html=False,
+        auto_play=False,
+        config={"displaylogo": False, "responsive": True},
+        div_id=INTERACTIVE_PLOT_DIV_ID,
+    )
+    _atomic_text(destination, _interactive_html_document(plot_html))
 
 
 def _world_bounds(
