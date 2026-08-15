@@ -17,6 +17,8 @@ import hashlib
 
 import numpy as np
 
+from .mesh_io import load_surface_mesh
+
 
 POINT_TOLERANCE_MM = 1e-5
 AXIS_TOLERANCE = 1e-8
@@ -220,13 +222,13 @@ def _color(organ: str) -> tuple[int, int, int]:
         raise ValueError(f"没有为器官 {organ!r} 定义可视化颜色") from error
 
 
-def _validate_provenance(provenance: Mapping[str, object]) -> dict[str, str]:
+def _validate_provenance(provenance: Mapping[str, object]) -> dict[str, object]:
     expected_lengths = {
         "source_manifest_sha256": 64,
         "core_design_sha256": 64,
         "build_git_commit": 40,
     }
-    result: dict[str, str] = {}
+    result: dict[str, object] = {}
     for key, length in expected_lengths.items():
         value = provenance.get(key)
         if (
@@ -236,6 +238,24 @@ def _validate_provenance(provenance: Mapping[str, object]) -> dict[str, str]:
         ):
             raise ValueError(f"provenance.{key} 必须是 {length} 位十六进制字符串")
         result[key] = value.lower()
+    input_coordinate_system = provenance.get("input_organ_mesh_coordinate_system")
+    if input_coordinate_system is not None:
+        if input_coordinate_system not in {"LPS", "RAS"}:
+            raise ValueError("provenance.input_organ_mesh_coordinate_system 必须是 LPS 或 RAS")
+        result["input_organ_mesh_coordinate_system"] = str(input_coordinate_system)
+    display_coordinate_system = provenance.get("visualization_coordinate_system")
+    if display_coordinate_system is not None:
+        if display_coordinate_system != "RAS":
+            raise ValueError("provenance.visualization_coordinate_system 必须是 RAS")
+        result["visualization_coordinate_system"] = "RAS"
+    translation = provenance.get("esophagus_copy_translation_mm")
+    if translation is not None:
+        if isinstance(translation, bool) or not isinstance(translation, (int, float)):
+            raise ValueError("provenance.esophagus_copy_translation_mm 必须是有限负数")
+        numeric_translation = float(translation)
+        if not np.isfinite(numeric_translation) or numeric_translation >= 0.0:
+            raise ValueError("provenance.esophagus_copy_translation_mm 必须是有限负数")
+        result["esophagus_copy_translation_mm"] = numeric_translation
     return result
 
 
@@ -939,20 +959,51 @@ def _validate_surface_samples(
             raise ValueError(f"{organ} 的 FPS 法向量与零度记录不一致")
 
 
-def _load_organ_meshes(directory: Path) -> dict[str, Any]:
+def load_visualization_organ_meshes(
+    directory: str | Path,
+    *,
+    input_coordinate_system: str,
+) -> tuple[dict[str, Any], float]:
+    """把原始器官网格统一为 RAS，并构造实际采样使用的食管复制段。"""
+
     import trimesh
 
+    source_directory = Path(directory)
     meshes: dict[str, Any] = {}
     for organ in TARGET_ORGAN_COUNTS:
-        source = directory / f"{organ}.ply"
+        source = source_directory / f"{organ}.ply"
         if not source.is_file():
             raise ValueError(f"缺少目标器官网格: {source}")
-        loaded = trimesh.load(source, process=False, force="mesh")
-        if not isinstance(loaded, trimesh.Trimesh) or loaded.is_empty:
+        loaded = load_surface_mesh(
+            source, input_coordinate_system=input_coordinate_system
+        ).mesh
+        if loaded.is_empty:
             raise ValueError(f"目标器官网格无效: {source}")
         _mesh_arrays(loaded, max(1, len(loaded.faces)), 0)
         meshes[organ] = loaded
-    return meshes
+
+    esophagus = meshes["esophagus"]
+    liver = meshes["liver"]
+    maximum_valid_z = float(np.max(np.asarray(liver.vertices)[:, 2]))
+    valid_vertices = np.asarray(esophagus.vertices)[:, 2] <= maximum_valid_z
+    valid_points = np.asarray(esophagus.vertices)[valid_vertices]
+    if len(valid_points) == 0:
+        raise ValueError("食管模型在肝脏最大 z 以下没有有效采样段")
+    span_mm = float(np.ptp(valid_points[:, 2]))
+    if span_mm <= POINT_TOLERANCE_MM:
+        raise ValueError("食管有效采样段 z 跨度必须大于零")
+    valid_faces = np.all(valid_vertices[np.asarray(esophagus.faces)], axis=1)
+    if not np.any(valid_faces):
+        raise ValueError("食管有效采样段没有完整三角面")
+    original_segment = esophagus.submesh([valid_faces], append=True, repair=False)
+    translated_segment = original_segment.copy()
+    translated_vertices = np.asarray(translated_segment.vertices).copy()
+    translated_vertices[:, 2] -= span_mm
+    translated_segment.vertices = translated_vertices
+    meshes["esophagus"] = trimesh.util.concatenate(
+        (original_segment, translated_segment)
+    )
+    return meshes, span_mm
 
 
 def _read_run_metadata(path: Path) -> dict[str, object]:
@@ -970,7 +1021,7 @@ def _read_run_metadata(path: Path) -> dict[str, object]:
 
 
 def _readme_text(
-    records: list[ZeroPlaneRecord], provenance: Mapping[str, str]
+    records: list[ZeroPlaneRecord], provenance: Mapping[str, object]
 ) -> str:
     counts = Counter(record.organ for record in records)
     color_lines = [
@@ -988,6 +1039,8 @@ def _readme_text(
             "- 零度面直接来自正式 manifest 中 roll=0、pitch=0、yaw=0 的记录。",
             "- 每个切面为 100 mm x 100 mm；探头/采样点位于方形底边中点。",
             "- 局部 +x 指向切面深度，+y 沿底边，+z=x×y，满足右手关系。",
+            f"- 原始器官网格坐标：{provenance.get('input_organ_mesh_coordinate_system', '未记录')}；显示前统一转换为 RAS。",
+            f"- 食管有效段复制位移：{provenance.get('esophagus_copy_translation_mm', '未记录')} mm（沿 S/I 轴负方向）。",
             "- squarePLY 与 rectangles.ply 包含全旋转切面，本交付未将其误作零度面。",
             "",
             "器官颜色与数量",
@@ -1067,7 +1120,21 @@ def export_visualization_bundle(
                 "build_git_commit": metadata.get("build_git_commit"),
             }
         )
-        meshes = _load_organ_meshes(Path(organ_mesh_directory))
+        input_coordinate_system = metadata.get("input_coordinate_system")
+        if input_coordinate_system not in {"LPS", "RAS"}:
+            raise ValueError("run_metadata.input_coordinate_system 必须是 LPS 或 RAS")
+        meshes, esophagus_span_mm = load_visualization_organ_meshes(
+            organ_mesh_directory,
+            input_coordinate_system=str(input_coordinate_system),
+        )
+        provenance = _validate_provenance(
+            {
+                **provenance,
+                "input_organ_mesh_coordinate_system": input_coordinate_system,
+                "visualization_coordinate_system": "RAS",
+                "esophagus_copy_translation_mm": -esophagus_span_mm,
+            }
+        )
         staging.mkdir(parents=True)
         write_structured_exports(records, staging, provenance)
         render_interactive_html(
@@ -1077,7 +1144,7 @@ def export_visualization_bundle(
         mesh_output = staging / "target_organ_meshes"
         mesh_output.mkdir()
         for organ in TARGET_ORGAN_COUNTS:
-            shutil.copy2(Path(organ_mesh_directory) / f"{organ}.ply", mesh_output / f"{organ}.ply")
+            meshes[organ].export(mesh_output / f"{organ}.ply", file_type="ply")
         _atomic_text(staging / "README_中文.txt", _readme_text(records, provenance))
         _write_sha256_manifest(staging)
         os.replace(staging, destination)

@@ -13,6 +13,7 @@ import pytest
 import trimesh
 
 from ct_vascular_resampling.zero_plane_visualization import (
+    load_visualization_organ_meshes,
     project_orthographic,
     render_interactive_html,
     render_static_views,
@@ -226,6 +227,50 @@ def test_project_orthographic_uses_two_patient_axes(view, expected, labels):
     assert (x_label, y_label) == labels
 
 
+def test_load_visualization_meshes_converts_lps_to_ras_and_duplicates_esophagus(tmp_path):
+    meshes = tmp_path / "meshes"
+    meshes.mkdir()
+    for organ in TARGET_COUNTS:
+        if organ == "esophagus":
+            vertices = np.asarray(
+                [
+                    [x, y, z]
+                    for z in (0.0, 5.0, 10.0)
+                    for x, y in ((8.0, 17.0), (12.0, 17.0), (12.0, 23.0), (8.0, 23.0))
+                ]
+            )
+            faces = []
+            for lower in (0, 4):
+                upper = lower + 4
+                for index in range(4):
+                    following = (index + 1) % 4
+                    faces.extend(
+                        [
+                            [lower + index, lower + following, upper + following],
+                            [lower + index, upper + following, upper + index],
+                        ]
+                    )
+            mesh = trimesh.Trimesh(vertices=vertices, faces=np.asarray(faces), process=False)
+        else:
+            mesh = trimesh.creation.box(extents=(4.0, 6.0, 10.0))
+            mesh.apply_translation((10.0, 20.0, 5.0))
+        if organ == "liver":
+            mesh.apply_translation((0.0, 0.0, -5.0))
+        mesh.export(meshes / f"{organ}.ply")
+
+    loaded, esophagus_span = load_visualization_organ_meshes(
+        meshes, input_coordinate_system="LPS"
+    )
+
+    stomach_vertices = np.asarray(loaded["stomach"].vertices)
+    assert np.allclose(stomach_vertices.min(axis=0), [-12.0, -23.0, 0.0])
+    assert np.allclose(stomach_vertices.max(axis=0), [-8.0, -17.0, 10.0])
+    assert esophagus_span == pytest.approx(5.0)
+    esophagus_z = np.asarray(loaded["esophagus"].vertices)[:, 2]
+    assert float(esophagus_z.min()) == pytest.approx(-5.0)
+    assert float(esophagus_z.max()) == pytest.approx(5.0)
+
+
 TARGET_COUNTS = {
     "stomach": 118,
     "liver": 162,
@@ -302,6 +347,7 @@ def test_cli_exports_complete_case2_bundle(tmp_path):
             {
                 "run_state": "complete",
                 "total_squares": 1431118,
+                "input_coordinate_system": "RAS",
                 "core_design_sha256": "b" * 64,
                 "build_git_commit": "c" * 40,
             }
