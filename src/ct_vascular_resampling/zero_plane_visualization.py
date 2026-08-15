@@ -546,11 +546,17 @@ def _interactive_html_document(plot_html: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     html, body {{ width: 100%; height: 100%; margin: 0; }}
+    body {{ display: flex; flex-direction: column; overflow: hidden; }}
+    .zero-plane-toolbar {{
+      flex: 0 0 38px;
+      display: flex;
+      align-items: center;
+      padding: 4px 10px;
+      box-sizing: border-box;
+      border-bottom: 1px solid #d6e0ec;
+      background: #ffffff;
+    }}
     .zero-plane-toggle-control {{
-      position: fixed;
-      top: 8px;
-      left: clamp(8px, 30vw, 445px);
-      z-index: 1000;
       display: flex;
       align-items: center;
       gap: 6px;
@@ -566,13 +572,20 @@ def _interactive_html_document(plot_html: str) -> str:
       cursor: pointer;
     }}
     .zero-plane-toggle-control input {{ margin: 0; }}
+    #{INTERACTIVE_PLOT_DIV_ID} {{
+      flex: 1 1 auto;
+      min-height: 0;
+      height: auto !important;
+    }}
   </style>
 </head>
 <body>
-  <label class="zero-plane-toggle-control" for="{ZERO_PLANE_TOGGLE_ID}">
-    <input id="{ZERO_PLANE_TOGGLE_ID}" type="checkbox" checked aria-label="显示 0° 基准面">
-    <span>显示 0° 基准面</span>
-  </label>
+  <div class="zero-plane-toolbar">
+    <label class="zero-plane-toggle-control" for="{ZERO_PLANE_TOGGLE_ID}">
+      <input id="{ZERO_PLANE_TOGGLE_ID}" type="checkbox" checked aria-label="显示 0° 基准面">
+      <span>显示 0° 基准面</span>
+    </label>
+  </div>
   {plot_html}
 </body>
 </html>

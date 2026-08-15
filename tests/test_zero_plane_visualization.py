@@ -207,6 +207,8 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
     assert '"opacity":0.22' in html
     assert 'id="zero-plane-visualization"' in html
     assert 'id="zero-plane-visibility-toggle"' in html
+    assert 'class="zero-plane-toolbar"' in html
+    assert "position: fixed" not in html
     assert "显示 0° 基准面" in html
     assert "const planeTraceIndices = [2,3];" in html
     assert "plotly_buttonclicked" in html
