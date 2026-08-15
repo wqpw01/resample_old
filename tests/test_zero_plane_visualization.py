@@ -12,6 +12,7 @@ from PIL import Image
 import pytest
 import trimesh
 
+from ct_vascular_resampling import zero_plane_visualization as visualization
 from ct_vascular_resampling.zero_plane_visualization import (
     load_visualization_organ_meshes,
     project_orthographic,
@@ -201,6 +202,9 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
     assert 'src="https://cdn.plot.ly' not in html
     assert "Plotly.newPlot" in html
     assert "stomach" in html
+    assert visualization.INTERACTIVE_ORGAN_MESH_OPACITY == pytest.approx(0.22)
+    assert visualization.STATIC_ORGAN_MESH_ALPHA == pytest.approx(0.14)
+    assert '"opacity":0.22' in html
     for name in ("isometric", "axial", "coronal", "sagittal"):
         path = tmp_path / f"sampling_points_zero_planes_{name}.png"
         with Image.open(path) as image:

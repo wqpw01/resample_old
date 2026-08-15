@@ -22,6 +22,8 @@ from .mesh_io import load_surface_mesh
 
 POINT_TOLERANCE_MM = 1e-5
 AXIS_TOLERANCE = 1e-8
+INTERACTIVE_ORGAN_MESH_OPACITY = 0.22
+STATIC_ORGAN_MESH_ALPHA = 0.14
 
 ORGAN_COLORS: dict[str, tuple[int, int, int]] = {
     "stomach": (228, 87, 86),
@@ -517,7 +519,7 @@ def render_interactive_html(
                 legendgroup=organ,
                 legendgrouptitle_text=organ,
                 color=_css_color(color),
-                opacity=0.12,
+                opacity=INTERACTIVE_ORGAN_MESH_OPACITY,
                 hoverinfo="skip",
                 showlegend=True,
             )
@@ -727,7 +729,7 @@ def render_static_views(
                 axis.add_collection3d(
                     Poly3DCollection(
                         mesh_vertices[mesh_faces],
-                        facecolors=[(*color, 0.075)],
+                        facecolors=[(*color, STATIC_ORGAN_MESH_ALPHA)],
                         edgecolors="none",
                     )
                 )
@@ -790,7 +792,7 @@ def render_static_views(
                 axis.add_collection(
                     PolyCollection(
                         projected_mesh,
-                        facecolors=[(*color, 0.075)],
+                        facecolors=[(*color, STATIC_ORGAN_MESH_ALPHA)],
                         edgecolors="none",
                     )
                 )
