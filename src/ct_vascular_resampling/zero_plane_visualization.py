@@ -680,9 +680,13 @@ def _interactive_html_document(plot_html: str) -> str:
       white-space: nowrap;
     }}
     .continuous-surface-control input {{ margin: 0; }}
-    #{INTERACTIVE_PLOT_DIV_ID} {{
+    .zero-plane-plot-shell {{
       flex: 1 1 auto;
       min-height: 0;
+      overflow: hidden;
+    }}
+    .zero-plane-plot-shell > div {{ height: 100%; }}
+    #{INTERACTIVE_PLOT_DIV_ID} {{
       height: 100% !important;
     }}
   </style>
@@ -705,7 +709,9 @@ def _interactive_html_document(plot_html: str) -> str:
       <span>使用不透明连续表面</span>
     </label>
   </div>
-  {plot_html}
+  <main class="zero-plane-plot-shell">
+    {plot_html}
+  </main>
 </body>
 </html>
 """
