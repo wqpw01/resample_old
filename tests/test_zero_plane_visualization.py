@@ -253,6 +253,9 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
         '"j":[1,1,2,0],"k":[2,3,3,3]}};' in html
     )
     assert "const performanceSurfaceFaces" in html
+    assert "i: Array.from(graph._fullData[index].i)" in html
+    assert "j: Array.from(graph._fullData[index].j)" in html
+    assert "k: Array.from(graph._fullData[index].k)" in html
     assert "opacitySlider.disabled = continuous;" in html
     assert "i: [faces.i], j: [faces.j], k: [faces.k]" in html
     assert "opacity: continuous ? 1.0 : Number(opacitySlider.value)" in html

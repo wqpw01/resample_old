@@ -538,9 +538,9 @@ def _interactive_controls_script(
 
   const performanceSurfaceFaces = Object.fromEntries(
     organMeshTraceIndices.map(index => [index, {{
-      i: Array.from(graph.data[index].i),
-      j: Array.from(graph.data[index].j),
-      k: Array.from(graph.data[index].k)
+      i: Array.from(graph._fullData[index].i),
+      j: Array.from(graph._fullData[index].j),
+      k: Array.from(graph._fullData[index].k)
     }}])
   );
   let zeroPlanesVisible = true;
