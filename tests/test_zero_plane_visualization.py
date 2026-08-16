@@ -211,6 +211,10 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
     assert "position: fixed" not in html
     assert "显示 0° 基准面" in html
     assert "const planeTraceIndices = [2,3];" in html
+    assert (
+        '"visible":[true,true,false,false,false,false,false]}],'
+        '"label":"Points only"' in html
+    )
     assert "plotly_buttonclicked" in html
     assert "indeterminate" in html
     for name in ("isometric", "axial", "coronal", "sagittal"):

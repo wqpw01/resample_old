@@ -726,7 +726,7 @@ def render_interactive_html(
 
     buttons = [
         ("All", {"organ_mesh", "points", "planes", "axes"}),
-        ("Points only", {"points"}),
+        ("Points only", {"organ_mesh", "points"}),
         ("Points + zero planes", {"points", "planes", "axes"}),
         ("Hide organ meshes", {"points", "planes", "axes"}),
     ]
