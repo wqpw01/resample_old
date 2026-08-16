@@ -31,6 +31,8 @@ INTERACTIVE_PLOT_DIV_ID = "zero-plane-visualization"
 ZERO_PLANE_TOGGLE_ID = "zero-plane-visibility-toggle"
 ORGAN_OPACITY_SLIDER_ID = "organ-mesh-opacity-slider"
 ORGAN_OPACITY_VALUE_ID = "organ-mesh-opacity-value"
+CONTINUOUS_SURFACE_TOGGLE_ID = "continuous-organ-surface-toggle"
+DEFAULT_CAMERA_EYE = {"x": 1.05, "y": -1.12, "z": 0.76}
 
 ORGAN_COLORS: dict[str, tuple[int, int, int]] = {
     "stomach": (228, 87, 86),
@@ -445,17 +447,22 @@ def write_structured_exports(
     )
 
 
-def _mesh_arrays(mesh: Any, maximum_faces: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+def _mesh_arrays(
+    mesh: Any, maximum_faces: int, seed: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
-    faces = np.asarray(mesh.faces, dtype=np.int64)
+    continuous_faces = np.asarray(mesh.faces, dtype=np.int64).copy()
     if vertices.ndim != 2 or vertices.shape[1] != 3 or not np.all(np.isfinite(vertices)):
         raise ValueError("器官网格顶点必须是有限的 Nx3 数组")
-    if faces.ndim != 2 or faces.shape[1] != 3:
+    if continuous_faces.ndim != 2 or continuous_faces.shape[1] != 3:
         raise ValueError("器官网格必须由三角面组成")
-    if len(faces) > maximum_faces:
+    performance_faces = continuous_faces
+    if len(performance_faces) > maximum_faces:
         generator = np.random.default_rng(seed)
-        faces = faces[np.sort(generator.choice(len(faces), maximum_faces, replace=False))]
-    return vertices, faces
+        performance_faces = performance_faces[
+            np.sort(generator.choice(len(performance_faces), maximum_faces, replace=False))
+        ]
+    return vertices, performance_faces, continuous_faces
 
 
 def _css_color(color: tuple[int, int, int]) -> str:
@@ -486,7 +493,9 @@ def _line_coordinates(segments: Iterable[np.ndarray]) -> tuple[list[float | None
     return x_values, y_values, z_values
 
 
-def _interactive_controls_script(roles: list[str]) -> str:
+def _interactive_controls_script(
+    roles: list[str], continuous_faces_by_trace: Mapping[int, np.ndarray]
+) -> str:
     plane_indices = [index for index, role in enumerate(roles) if role == "planes"]
     if not plane_indices:
         raise ValueError("交互可视化缺少零度基准面 trace")
@@ -497,22 +506,43 @@ def _interactive_controls_script(roles: list[str]) -> str:
         raise ValueError("交互可视化缺少器官网格 trace")
     plane_indices_json = json.dumps(plane_indices, separators=(",", ":"))
     organ_indices_json = json.dumps(organ_mesh_indices, separators=(",", ":"))
+    continuous_faces_json = json.dumps(
+        {
+            str(index): {
+                "i": faces[:, 0].tolist(),
+                "j": faces[:, 1].tolist(),
+                "k": faces[:, 2].tolist(),
+            }
+            for index, faces in continuous_faces_by_trace.items()
+        },
+        separators=(",", ":"),
+    )
     plot_id_json = json.dumps(INTERACTIVE_PLOT_DIV_ID)
     toggle_id_json = json.dumps(ZERO_PLANE_TOGGLE_ID)
     opacity_slider_id_json = json.dumps(ORGAN_OPACITY_SLIDER_ID)
     opacity_value_id_json = json.dumps(ORGAN_OPACITY_VALUE_ID)
+    continuous_toggle_id_json = json.dumps(CONTINUOUS_SURFACE_TOGGLE_ID)
     return f"""
 (function() {{
   const graph = document.getElementById({plot_id_json});
   const checkbox = document.getElementById({toggle_id_json});
   const opacitySlider = document.getElementById({opacity_slider_id_json});
   const opacityValue = document.getElementById({opacity_value_id_json});
+  const continuousSurfaceToggle = document.getElementById({continuous_toggle_id_json});
   const planeTraceIndices = {plane_indices_json};
   const organMeshTraceIndices = {organ_indices_json};
-  if (!graph || !checkbox || !opacitySlider || !opacityValue) {{
+  const continuousSurfaceFaces = {continuous_faces_json};
+  if (!graph || !checkbox || !opacitySlider || !opacityValue || !continuousSurfaceToggle) {{
     return;
   }}
 
+  const performanceSurfaceFaces = Object.fromEntries(
+    organMeshTraceIndices.map(index => [index, {{
+      i: Array.from(graph.data[index].i),
+      j: Array.from(graph.data[index].j),
+      k: Array.from(graph.data[index].k)
+    }}])
+  );
   let zeroPlanesVisible = true;
   const traceIsVisible = (index) => {{
     const value = graph.data[index].visible;
@@ -538,12 +568,30 @@ def _interactive_controls_script(roles: list[str]) -> str:
     opacityValue.textContent = opacityValue.value;
     return Plotly.restyle(graph, {{opacity}}, organMeshTraceIndices);
   }};
+  const applyContinuousSurfaceState = async () => {{
+    const continuous = continuousSurfaceToggle.checked;
+    opacitySlider.disabled = continuous;
+    opacityValue.value = continuous
+      ? "100%"
+      : `${{Math.round(Number(opacitySlider.value) * 100)}}%`;
+    opacityValue.textContent = opacityValue.value;
+    for (const index of organMeshTraceIndices) {{
+      const faces = continuous
+        ? continuousSurfaceFaces[index]
+        : performanceSurfaceFaces[index];
+      await Plotly.restyle(graph, {{
+        i: [faces.i], j: [faces.j], k: [faces.k],
+        opacity: continuous ? 1.0 : Number(opacitySlider.value)
+      }}, [index]);
+    }}
+  }};
 
   checkbox.addEventListener("change", () => {{
     zeroPlanesVisible = checkbox.checked;
     applyZeroPlaneState();
   }});
   opacitySlider.addEventListener("input", applyOrganOpacity);
+  continuousSurfaceToggle.addEventListener("change", applyContinuousSurfaceState);
   graph.on("plotly_buttonclicked", (event) => {{
     const label = event && event.button ? event.button.label : "";
     if (label === "Points only") {{
@@ -608,6 +656,15 @@ def _interactive_html_document(plot_html: str) -> str:
     .organ-opacity-control label {{ white-space: nowrap; }}
     .organ-opacity-control input[type="range"] {{ width: 160px; }}
     .organ-opacity-control output {{ display: inline-block; min-width: 3ch; }}
+    .continuous-surface-control {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #243b5a;
+      font: 13px Arial, sans-serif;
+      white-space: nowrap;
+    }}
+    .continuous-surface-control input {{ margin: 0; }}
     #{INTERACTIVE_PLOT_DIV_ID} {{
       flex: 1 1 auto;
       min-height: 0;
@@ -628,6 +685,10 @@ def _interactive_html_document(plot_html: str) -> str:
       </label>
       <input id="{ORGAN_OPACITY_SLIDER_ID}" type="range" min="{ORGAN_OPACITY_MIN}" max="{ORGAN_OPACITY_MAX}" step="{ORGAN_OPACITY_STEP}" value="{INTERACTIVE_ORGAN_MESH_OPACITY}" aria-label="器官网格不透明度">
     </div>
+    <label class="continuous-surface-control" for="{CONTINUOUS_SURFACE_TOGGLE_ID}">
+      <input id="{CONTINUOUS_SURFACE_TOGGLE_ID}" type="checkbox" aria-label="使用不透明连续表面">
+      <span>使用不透明连续表面</span>
+    </label>
   </div>
   {plot_html}
 </body>
@@ -654,6 +715,7 @@ def render_interactive_html(
 
     figure = go.Figure()
     roles: list[str] = []
+    continuous_faces_by_trace: dict[int, np.ndarray] = {}
     axis_styles = (
         ("x", (214, 39, 40)),
         ("y", (44, 160, 44)),
@@ -662,7 +724,10 @@ def render_interactive_html(
     for organ_index, organ in enumerate(organs):
         organ_records = [record for record in values if record.organ == organ]
         color = _color(organ)
-        vertices, faces = _mesh_arrays(organ_meshes[organ], 12_000, organ_index + 20260815)
+        vertices, faces, continuous_faces = _mesh_arrays(
+            organ_meshes[organ], 12_000, organ_index + 20260815
+        )
+        organ_mesh_trace_index = len(figure.data)
         figure.add_trace(
             go.Mesh3d(
                 x=vertices[:, 0],
@@ -680,6 +745,7 @@ def render_interactive_html(
                 showlegend=True,
             )
         )
+        continuous_faces_by_trace[organ_mesh_trace_index] = continuous_faces
         roles.append("organ_mesh")
 
         probes = np.asarray([record.probe for record in organ_records])
@@ -782,7 +848,7 @@ def render_interactive_html(
             "xaxis_title": "R (+) / L (-) [mm]",
             "yaxis_title": "A (+) / P (-) [mm]",
             "zaxis_title": "S (+) / I (-) [mm]",
-            "camera": {"eye": {"x": 1.45, "y": -1.55, "z": 1.05}},
+            "camera": {"eye": dict(DEFAULT_CAMERA_EYE)},
         },
         legend={"groupclick": "togglegroup", "itemsizing": "constant"},
         updatemenus=[
@@ -803,7 +869,7 @@ def render_interactive_html(
     plot_html = pio.to_html(
         figure,
         include_plotlyjs=True,
-        post_script=_interactive_controls_script(roles),
+        post_script=_interactive_controls_script(roles, continuous_faces_by_trace),
         full_html=False,
         auto_play=False,
         config={"displaylogo": False, "responsive": True},
@@ -876,7 +942,7 @@ def render_static_views(
             axis = figure.add_subplot(111, projection="3d")
             for organ_index, organ in enumerate(organs):
                 color = np.asarray(_color(organ), dtype=np.float64) / 255.0
-                mesh_vertices, mesh_faces = _mesh_arrays(
+                mesh_vertices, mesh_faces, _ = _mesh_arrays(
                     organ_meshes[organ], 5_000, organ_index + 20260815
                 )
                 axis.add_collection3d(
@@ -936,7 +1002,7 @@ def render_static_views(
             axis = figure.add_subplot(111)
             for organ_index, organ in enumerate(organs):
                 color = np.asarray(_color(organ), dtype=np.float64) / 255.0
-                mesh_vertices, mesh_faces = _mesh_arrays(
+                mesh_vertices, mesh_faces, _ = _mesh_arrays(
                     organ_meshes[organ], 5_000, organ_index + 20260815
                 )
                 projected_mesh, x_label, y_label = project_orthographic(
@@ -1214,7 +1280,7 @@ def _readme_text(
             "",
             "打开方式",
             "--------",
-            "- HTML 可直接用浏览器离线打开；顶部工具栏可控制零度基准面显示和器官网格不透明度，右侧图例可按器官显隐。",
+            "- HTML 可直接用浏览器离线打开；顶部工具栏可控制零度基准面、器官网格不透明度和不透明连续表面，右侧图例可按器官显隐。",
             "- PLY 可在 3D Slicer、MeshLab 或 CloudCompare 中打开。",
             "- 在 3D Slicer 中必须保持 RAS 世界坐标，不要自动居中各个文件。",
             "",

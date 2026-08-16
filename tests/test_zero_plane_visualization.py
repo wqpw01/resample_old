@@ -173,6 +173,29 @@ def test_write_structured_exports_preserves_geometry_and_provenance(tmp_path):
     assert float(rows[0]["v2_x_mm"]) == 100.0
 
 
+def test_mesh_arrays_preserves_complete_faces_when_performance_faces_are_sampled():
+    complete_faces = np.column_stack(
+        (
+            np.arange(12_001),
+            np.arange(1, 12_002),
+            np.arange(2, 12_003),
+        )
+    )
+    mesh = trimesh.Trimesh(
+        vertices=np.zeros((12_003, 3)),
+        faces=complete_faces,
+        process=False,
+    )
+
+    _, performance_faces, continuous_faces = visualization._mesh_arrays(
+        mesh, 12_000, 20260815
+    )
+
+    assert len(performance_faces) == 12_000
+    assert len(continuous_faces) == 12_001
+    assert np.array_equal(continuous_faces, complete_faces)
+
+
 def test_render_outputs_are_offline_and_nonblank(tmp_path):
     records = select_zero_planes([_record()], {"stomach": 1})
     mesh = trimesh.Trimesh(
@@ -207,20 +230,35 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
     assert visualization.ORGAN_OPACITY_MIN == pytest.approx(0.10)
     assert visualization.ORGAN_OPACITY_MAX == pytest.approx(1.00)
     assert visualization.ORGAN_OPACITY_STEP == pytest.approx(0.05)
+    assert visualization.DEFAULT_CAMERA_EYE == {"x": 1.05, "y": -1.12, "z": 0.76}
     assert '"opacity":0.7' in html
     assert 'id="zero-plane-visualization"' in html
     assert 'id="zero-plane-visibility-toggle"' in html
     assert 'id="organ-mesh-opacity-slider"' in html
     assert 'id="organ-mesh-opacity-value"' in html
+    assert (
+        'id="continuous-organ-surface-toggle" type="checkbox" '
+        'aria-label="使用不透明连续表面"' in html
+    )
     assert 'min="0.1" max="1.0" step="0.05" value="0.7"' in html
     assert 'class="zero-plane-toolbar"' in html
     assert "position: fixed" not in html
     assert "显示 0° 基准面" in html
     assert "器官网格不透明度" in html
+    assert "使用不透明连续表面" in html
     assert "70%" in html
     assert "const organMeshTraceIndices = [0];" in html
+    assert (
+        'const continuousSurfaceFaces = {"0":{"i":[0,0,1,2],'
+        '"j":[1,1,2,0],"k":[2,3,3,3]}};' in html
+    )
+    assert "const performanceSurfaceFaces" in html
+    assert "opacitySlider.disabled = continuous;" in html
+    assert "i: [faces.i], j: [faces.j], k: [faces.k]" in html
+    assert "opacity: continuous ? 1.0 : Number(opacitySlider.value)" in html
     assert "Plotly.restyle(graph, {opacity}, organMeshTraceIndices)" in html
     assert "const planeTraceIndices = [2,3];" in html
+    assert '"camera":{"eye":{"x":1.05,"y":-1.12,"z":0.76}}' in html
     assert (
         '"visible":[true,true,false,false,false,false,false]}],'
         '"label":"Points only"' in html
@@ -423,4 +461,8 @@ def test_cli_exports_complete_case2_bundle(tmp_path):
     }
     assert expected_files <= {path.name for path in output.iterdir() if path.is_file()}
     assert len(list((output / "target_organ_meshes").glob("*.ply"))) == 5
+    assert (
+        "顶部工具栏可控制零度基准面、器官网格不透明度和不透明连续表面"
+        in (output / "README_中文.txt").read_text(encoding="utf-8")
+    )
     assert not list(tmp_path.glob(".delivery.tmp*"))
