@@ -243,6 +243,7 @@ def test_render_outputs_are_offline_and_nonblank(tmp_path):
     assert 'min="0.1" max="1.0" step="0.05" value="0.7"' in html
     assert 'class="zero-plane-toolbar"' in html
     assert "position: fixed" not in html
+    assert "height: 100% !important;" in html
     assert "显示 0° 基准面" in html
     assert "器官网格不透明度" in html
     assert "使用不透明连续表面" in html

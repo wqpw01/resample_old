@@ -683,7 +683,7 @@ def _interactive_html_document(plot_html: str) -> str:
     #{INTERACTIVE_PLOT_DIV_ID} {{
       flex: 1 1 auto;
       min-height: 0;
-      height: auto !important;
+      height: 100% !important;
     }}
   </style>
 </head>
