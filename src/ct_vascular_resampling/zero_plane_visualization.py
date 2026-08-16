@@ -532,6 +532,9 @@ def _interactive_controls_script(
   const planeTraceIndices = {plane_indices_json};
   const organMeshTraceIndices = {organ_indices_json};
   const continuousSurfaceFaces = {continuous_faces_json};
+  const planeVisiblePresetLabels = new Set([
+    "All", "Points + zero planes", "Hide organ meshes"
+  ]);
   if (!graph || !checkbox || !opacitySlider || !opacityValue || !continuousSurfaceToggle) {{
     return;
   }}
@@ -608,7 +611,7 @@ def _interactive_controls_script(
     const label = event && event.button ? event.button.label : "";
     if (label === "Points only") {{
       zeroPlanesVisible = false;
-    }} else if (label === "Points + zero planes") {{
+    }} else if (planeVisiblePresetLabels.has(label)) {{
       zeroPlanesVisible = true;
     }}
     window.setTimeout(applyZeroPlaneState, 0);
