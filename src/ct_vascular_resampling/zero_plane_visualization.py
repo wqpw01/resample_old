@@ -22,10 +22,15 @@ from .mesh_io import load_surface_mesh
 
 POINT_TOLERANCE_MM = 1e-5
 AXIS_TOLERANCE = 1e-8
-INTERACTIVE_ORGAN_MESH_OPACITY = 0.22
+INTERACTIVE_ORGAN_MESH_OPACITY = 0.70
 STATIC_ORGAN_MESH_ALPHA = 0.14
+ORGAN_OPACITY_MIN = 0.10
+ORGAN_OPACITY_MAX = 1.00
+ORGAN_OPACITY_STEP = 0.05
 INTERACTIVE_PLOT_DIV_ID = "zero-plane-visualization"
 ZERO_PLANE_TOGGLE_ID = "zero-plane-visibility-toggle"
+ORGAN_OPACITY_SLIDER_ID = "organ-mesh-opacity-slider"
+ORGAN_OPACITY_VALUE_ID = "organ-mesh-opacity-value"
 
 ORGAN_COLORS: dict[str, tuple[int, int, int]] = {
     "stomach": (228, 87, 86),
@@ -481,19 +486,30 @@ def _line_coordinates(segments: Iterable[np.ndarray]) -> tuple[list[float | None
     return x_values, y_values, z_values
 
 
-def _zero_plane_visibility_script(roles: list[str]) -> str:
+def _interactive_controls_script(roles: list[str]) -> str:
     plane_indices = [index for index, role in enumerate(roles) if role == "planes"]
     if not plane_indices:
         raise ValueError("交互可视化缺少零度基准面 trace")
-    indices_json = json.dumps(plane_indices, separators=(",", ":"))
+    organ_mesh_indices = [
+        index for index, role in enumerate(roles) if role == "organ_mesh"
+    ]
+    if not organ_mesh_indices:
+        raise ValueError("交互可视化缺少器官网格 trace")
+    plane_indices_json = json.dumps(plane_indices, separators=(",", ":"))
+    organ_indices_json = json.dumps(organ_mesh_indices, separators=(",", ":"))
     plot_id_json = json.dumps(INTERACTIVE_PLOT_DIV_ID)
     toggle_id_json = json.dumps(ZERO_PLANE_TOGGLE_ID)
+    opacity_slider_id_json = json.dumps(ORGAN_OPACITY_SLIDER_ID)
+    opacity_value_id_json = json.dumps(ORGAN_OPACITY_VALUE_ID)
     return f"""
 (function() {{
   const graph = document.getElementById({plot_id_json});
   const checkbox = document.getElementById({toggle_id_json});
-  const planeTraceIndices = {indices_json};
-  if (!graph || !checkbox) {{
+  const opacitySlider = document.getElementById({opacity_slider_id_json});
+  const opacityValue = document.getElementById({opacity_value_id_json});
+  const planeTraceIndices = {plane_indices_json};
+  const organMeshTraceIndices = {organ_indices_json};
+  if (!graph || !checkbox || !opacitySlider || !opacityValue) {{
     return;
   }}
 
@@ -516,11 +532,18 @@ def _zero_plane_visibility_script(roles: list[str]) -> str:
       planeTraceIndices
     ).then(syncToggleFromPlot);
   }};
+  const applyOrganOpacity = () => {{
+    const opacity = Number(opacitySlider.value);
+    opacityValue.value = `${{Math.round(opacity * 100)}}%`;
+    opacityValue.textContent = opacityValue.value;
+    return Plotly.restyle(graph, {{opacity}}, organMeshTraceIndices);
+  }};
 
   checkbox.addEventListener("change", () => {{
     zeroPlanesVisible = checkbox.checked;
     applyZeroPlaneState();
   }});
+  opacitySlider.addEventListener("input", applyOrganOpacity);
   graph.on("plotly_buttonclicked", (event) => {{
     const label = event && event.button ? event.button.label : "";
     if (label === "Points only") {{
@@ -548,9 +571,12 @@ def _interactive_html_document(plot_html: str) -> str:
     html, body {{ width: 100%; height: 100%; margin: 0; }}
     body {{ display: flex; flex-direction: column; overflow: hidden; }}
     .zero-plane-toolbar {{
-      flex: 0 0 38px;
+      flex: 0 0 auto;
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
+      gap: 12px;
+      min-height: 38px;
       padding: 4px 10px;
       box-sizing: border-box;
       border-bottom: 1px solid #d6e0ec;
@@ -572,6 +598,16 @@ def _interactive_html_document(plot_html: str) -> str:
       cursor: pointer;
     }}
     .zero-plane-toggle-control input {{ margin: 0; }}
+    .organ-opacity-control {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #243b5a;
+      font: 13px Arial, sans-serif;
+    }}
+    .organ-opacity-control label {{ white-space: nowrap; }}
+    .organ-opacity-control input[type="range"] {{ width: 160px; }}
+    .organ-opacity-control output {{ display: inline-block; min-width: 3ch; }}
     #{INTERACTIVE_PLOT_DIV_ID} {{
       flex: 1 1 auto;
       min-height: 0;
@@ -585,6 +621,13 @@ def _interactive_html_document(plot_html: str) -> str:
       <input id="{ZERO_PLANE_TOGGLE_ID}" type="checkbox" checked aria-label="显示 0° 基准面">
       <span>显示 0° 基准面</span>
     </label>
+    <div class="organ-opacity-control">
+      <label for="{ORGAN_OPACITY_SLIDER_ID}">
+        器官网格不透明度
+        <output id="{ORGAN_OPACITY_VALUE_ID}" for="{ORGAN_OPACITY_SLIDER_ID}">70%</output>
+      </label>
+      <input id="{ORGAN_OPACITY_SLIDER_ID}" type="range" min="{ORGAN_OPACITY_MIN}" max="{ORGAN_OPACITY_MAX}" step="{ORGAN_OPACITY_STEP}" value="{INTERACTIVE_ORGAN_MESH_OPACITY}" aria-label="器官网格不透明度">
+    </div>
   </div>
   {plot_html}
 </body>
@@ -760,7 +803,7 @@ def render_interactive_html(
     plot_html = pio.to_html(
         figure,
         include_plotlyjs=True,
-        post_script=_zero_plane_visibility_script(roles),
+        post_script=_interactive_controls_script(roles),
         full_html=False,
         auto_play=False,
         config={"displaylogo": False, "responsive": True},
@@ -1171,7 +1214,7 @@ def _readme_text(
             "",
             "打开方式",
             "--------",
-            "- HTML 可直接用浏览器离线打开；右上角图例可按器官显隐。",
+            "- HTML 可直接用浏览器离线打开；顶部工具栏可控制零度基准面显示和器官网格不透明度，右侧图例可按器官显隐。",
             "- PLY 可在 3D Slicer、MeshLab 或 CloudCompare 中打开。",
             "- 在 3D Slicer 中必须保持 RAS 世界坐标，不要自动居中各个文件。",
             "",
