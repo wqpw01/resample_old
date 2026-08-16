@@ -543,6 +543,13 @@ def _interactive_controls_script(
       k: Array.from(graph._fullData[index].k)
     }}])
   );
+  const organSurfaceVertices = Object.fromEntries(
+    organMeshTraceIndices.map(index => [index, {{
+      x: Array.from(graph._fullData[index].x),
+      y: Array.from(graph._fullData[index].y),
+      z: Array.from(graph._fullData[index].z)
+    }}])
+  );
   let zeroPlanesVisible = true;
   const traceIsVisible = (index) => {{
     const value = graph.data[index].visible;
@@ -575,15 +582,20 @@ def _interactive_controls_script(
       ? "100%"
       : `${{Math.round(Number(opacitySlider.value) * 100)}}%`;
     opacityValue.textContent = opacityValue.value;
+    const nextData = graph.data.slice();
     for (const index of organMeshTraceIndices) {{
       const faces = continuous
         ? continuousSurfaceFaces[index]
         : performanceSurfaceFaces[index];
-      await Plotly.restyle(graph, {{
-        i: [faces.i], j: [faces.j], k: [faces.k],
+      const vertices = organSurfaceVertices[index];
+      nextData[index] = {{
+        ...graph.data[index],
+        x: vertices.x, y: vertices.y, z: vertices.z,
+        i: faces.i, j: faces.j, k: faces.k,
         opacity: continuous ? 1.0 : Number(opacitySlider.value)
-      }}, [index]);
+      }};
     }}
+    await Plotly.react(graph, nextData, graph.layout, graph._context);
   }};
 
   checkbox.addEventListener("change", () => {{
