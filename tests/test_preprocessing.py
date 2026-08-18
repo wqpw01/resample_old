@@ -32,18 +32,6 @@ def segmentation_image() -> sitk.Image:
     return _image(labels, (10.0 + 5e-7, 20.0, 30.0))
 
 
-def test_case2_vessel_taxonomy_matches_confirmed_slicer_colours():
-    from ct_vascular_resampling.preprocessing import (
-        ARTERY_LABEL_VALUES,
-        PORTAL_AUXILIARY_LABEL_VALUES,
-        VEIN_LABEL_VALUES,
-    )
-
-    assert ARTERY_LABEL_VALUES == (8, 20, 22, 24, 25, 39, 40)
-    assert VEIN_LABEL_VALUES == (9, 23, 26, 27, 28, 29, 32, 33, 34, 35, 36, 37, 41, 42)
-    assert PORTAL_AUXILIARY_LABEL_VALUES == (23, 26, 33, 34, 35, 36, 37)
-
-
 def test_validate_geometry_accepts_sub_micrometre_origin_difference(ct_image, segmentation_image):
     from ct_vascular_resampling.preprocessing import validate_geometry
 
@@ -79,56 +67,6 @@ def test_mask_to_mesh_uses_origin_spacing_and_direction():
     assert len(mesh.faces) > 0
 
 
-def test_write_preprocessed_case_writes_ct_masks_meshes_manifest_and_case_yaml(tmp_path, ct_image):
-    from ct_vascular_resampling.preprocessing import (
-        ARTERY_LABEL_VALUES,
-        ORGAN_LABEL_VALUES,
-        PORTAL_AUXILIARY_LABEL_VALUES,
-        VEIN_LABEL_VALUES,
-        write_preprocessed_case,
-    )
-
-    label_values = sorted(
-        set(value for values in ORGAN_LABEL_VALUES.values() for value in values)
-        | set(ARTERY_LABEL_VALUES)
-        | set(VEIN_LABEL_VALUES)
-        | set(PORTAL_AUXILIARY_LABEL_VALUES)
-    )
-    labels = np.zeros((8, 8, 8), dtype=np.uint8)
-    for value, coordinate in zip(label_values, np.ndindex((6, 6, 6))):
-        labels[coordinate[0] + 1, coordinate[1] + 1, coordinate[2] + 1] = value
-    case_ct = _image(np.zeros_like(labels, dtype=np.int16), ct_image.GetOrigin())
-    segmentation = _image(labels, ct_image.GetOrigin())
-
-    result = write_preprocessed_case(case_ct, segmentation, tmp_path, Path('/tmp/2021.py'))
-
-    assert (tmp_path / 'ct' / 'ct_venous.nrrd').is_file()
-    assert (tmp_path / 'masks' / 'artery_tree.nrrd').is_file()
-    assert (tmp_path / 'models' / 'vein_tree.ply').is_file()
-    manifest = json.loads((tmp_path / 'manifest.json').read_text(encoding='utf-8'))
-    config = yaml.safe_load((tmp_path / 'case_preprocessed.yaml').read_text(encoding='utf-8'))
-    assert result['model_count'] == 16
-    assert manifest['models']['artery_tree']['source_label_values'] == list(ARTERY_LABEL_VALUES)
-    assert manifest['segmentation_origin_max_delta_mm'] < 1e-6
-    assert config['organ_models']['portal_vein_and_splenic_vein'] == 'models/portal_vein_and_splenic_vein.ply'
-    assert [model['label'] for model in config['vessel_models']] == ['artery', 'vein']
-    assert config['geometry'] == {'input_coordinate_system': 'LPS', 'canonical_coordinate_system': 'RAS'}
-    assert config['sampling']['ray_length_mm'] == 100.0
-    assert config['sampling']['ray_batch_size'] == 2048
-    assert config['sampling']['minimum_spacing_mm'] == 10.0
-    assert config['sampling']['centerline_max_terminal_spur_mm'] == 5.0
-    assert 'stomach_search_distance_mm' not in config['sampling']
-    assert config['square'] == {'side_length_mm': 100.0}
-
-
-def test_case2_runner_parser_requires_dicom_segmentation_and_output():
-    from scripts.preprocess_slicer_case import build_parser
-
-    args = build_parser().parse_args(['--dicom-dir', 'dicom', '--segmentation', 'seg.nrrd', '--output', 'out'])
-
-    assert args.series_id is None
-
-
 MANUAL_ORGAN_LABEL_VALUES = {
     "spleen": (1,),
     "kidney_right": (2,),
@@ -162,14 +100,11 @@ def _manual_case_inputs(tmp_path: Path) -> dict[str, Path]:
     vein_path = tmp_path / "vein_tree.ply"
     trimesh.creation.box().export(artery_path)
     trimesh.creation.icosphere().export(vein_path)
-    registration_path = tmp_path / "2021.py"
-    registration_path.write_text("# registration module\n", encoding="utf-8")
     return {
         "ct": ct_path,
         "segmentation": segmentation_path,
         "artery": artery_path,
         "vein": vein_path,
-        "registration": registration_path,
     }
 
 
@@ -189,7 +124,6 @@ def test_manual_preprocessing_writes_only_organs_and_references_external_vessels
         artery_model_path=inputs["artery"],
         vein_model_path=inputs["vein"],
         output_directory=output,
-        registration_module_path=inputs["registration"],
         output_root=tmp_path / "gallery-output",
         case_id="case_2_manual",
     )
@@ -253,6 +187,38 @@ def test_manual_preprocessing_writes_only_organs_and_references_external_vessels
     assert loaded.vessel_models[1].path == inputs["vein"].resolve()
 
 
+def test_manual_preprocessing_accepts_a_selected_dicom_series(monkeypatch, tmp_path):
+    from ct_vascular_resampling import manual_preprocessing
+
+    inputs = _manual_case_inputs(tmp_path)
+    dicom_directory = tmp_path / "dicom"
+    dicom_directory.mkdir()
+    (dicom_directory / "slice-001.dcm").write_bytes(b"test-dicom")
+    ct_image = sitk.ReadImage(str(inputs["ct"]))
+
+    def read_selected(source, *, dicom_series_uid):
+        assert source == dicom_directory.resolve()
+        assert dicom_series_uid == "1.2.840.test"
+        return ct_image
+
+    monkeypatch.setattr(manual_preprocessing, "read_ct_image", read_selected)
+
+    result = manual_preprocessing.write_manual_segmentation_case(
+        ct_path=dicom_directory,
+        dicom_series_uid="1.2.840.test",
+        segmentation_path=inputs["segmentation"],
+        artery_model_path=inputs["artery"],
+        vein_model_path=inputs["vein"],
+        output_directory=tmp_path / "prepared",
+        output_root=tmp_path / "gallery-output",
+        case_id="dicom-manual",
+    )
+
+    generated = yaml.safe_load(Path(result["case_config_path"]).read_text(encoding="utf-8"))
+    assert generated["ct_path"] == str(dicom_directory.resolve())
+    assert generated["dicom_series_uid"] == "1.2.840.test"
+
+
 @pytest.mark.parametrize(
     "failure",
     ["geometry", "missing_label", "missing_portal_segment", "missing_external_vessel"],
@@ -290,7 +256,6 @@ def test_manual_preprocessing_preflight_failures_write_nothing(tmp_path, failure
             artery_model_path=inputs["artery"],
             vein_model_path=inputs["vein"],
             output_directory=output,
-            registration_module_path=inputs["registration"],
             output_root=tmp_path / "gallery-output",
             case_id="case_2_manual",
         )

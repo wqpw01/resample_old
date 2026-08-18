@@ -10,8 +10,7 @@ import pytest
 from ct_vascular_resampling.gallery import GalleryWriter, write_rectangles_ply
 from ct_vascular_resampling.geometry import frame_from_vertices
 from ct_vascular_resampling.quality import QualityResult
-from ct_vascular_resampling.registration_adapter import load_gallery_database
-from ct_vascular_resampling.rendering import OrganLayer, VesselLayer, render_sample_images
+from ct_vascular_resampling.rendering import VesselLayer, render_sample_images
 from ct_vascular_resampling.geometry import SectionContour
 
 
@@ -26,12 +25,19 @@ def _rendered():
         centroid_mm=np.asarray([3.5, 3.5]),
         area_mm2=9.0,
     )
-    return render_sample_images(
+    rendered = render_sample_images(
         np.full((20, 20), 127, dtype=np.uint8),
         10.0,
         10.0,
-        [VesselLayer("portal_tree", "portal", (255, 0, 255), [contour])],
-        organ_layers=[OrganLayer("liver", "liver", (140, 86, 75), [contour])],
+        [VesselLayer("artery_tree", "artery", (255, 0, 255), [contour])],
+    )
+    return replace(
+        rendered,
+        organ_labels=["liver"],
+        eus_vessel_boundary=Image.new("RGB", rendered.ct.size, "white"),
+        ct_eus_vessel_overlay=rendered.ct.convert("RGB"),
+        eus_vessel_labels=[],
+        eus_vessel_features=[],
     )
 
 
@@ -76,7 +82,7 @@ def test_gallery_writer_routes_featured_sample_to_gallery_with_compatible_record
     assert (tmp_path / "case_001" / "gallery" / "ct" / "stomach-000001.png").is_file()
     assert (tmp_path / "case_001" / "gallery" / "organ_vessel_boundary" / "stomach-000001.png").is_file()
     record = json.loads((tmp_path / "case_001" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8"))
-    assert record["features"][0]["label"] == "portal"
+    assert record["features"][0]["label"] == "artery"
     assert record["ct_png"] == "ct/stomach-000001.png"
     assert record["organ_vessel_boundary_png"] == "organ_vessel_boundary/stomach-000001.png"
     assert record["organ_metadata_schema_version"] == "eus-organ-metadata/v1"
@@ -91,7 +97,6 @@ def test_manual_gallery_writer_persists_separate_eus_vessel_schema_and_images(tm
     writer = GalleryWriter(
         case_directory,
         case_id="case_001",
-        manual_segmentation_enabled=True,
     )
 
     status = writer.write_sample(
@@ -130,7 +135,6 @@ def test_manual_eus_features_never_promote_originally_unindexed_or_rejected_samp
     writer = GalleryWriter(
         case_directory,
         case_id="case_001",
-        manual_segmentation_enabled=True,
     )
 
     status = writer.write_sample(
@@ -158,7 +162,6 @@ def test_manual_gallery_writer_requires_all_eus_render_products_before_writing(t
     writer = GalleryWriter(
         case_directory,
         case_id="case_001",
-        manual_segmentation_enabled=True,
     )
 
     with pytest.raises(ValueError, match="EUS|eus_vessel"):
@@ -168,7 +171,7 @@ def test_manual_gallery_writer_requires_all_eus_render_products_before_writing(t
             np.zeros(3),
             np.asarray([0.0, 0.0, 1.0]),
             _frame(),
-            _rendered(),
+            replace(_rendered(), eus_vessel_boundary=None),
             QualityResult(True, None, 0.0),
         )
 
@@ -179,7 +182,6 @@ def _write_valid_manual_gallery(case_directory):
     writer = GalleryWriter(
         case_directory,
         case_id="case_001",
-        manual_segmentation_enabled=True,
     )
     writer.write_sample(
         "sample",
@@ -248,7 +250,6 @@ def test_manual_gallery_writer_rejects_corrupt_eus_metadata_on_resume(
         GalleryWriter(
             case_directory,
             case_id="case_001",
-            manual_segmentation_enabled=True,
         )
 
 
@@ -261,16 +262,7 @@ def test_manual_gallery_writer_rejects_missing_eus_image_on_resume(tmp_path):
         GalleryWriter(
             case_directory,
             case_id="case_001",
-            manual_segmentation_enabled=True,
         )
-
-
-def test_legacy_gallery_writer_refuses_manual_schema_mixing(tmp_path):
-    case_directory = tmp_path / "case_001"
-    _write_valid_manual_gallery(case_directory)
-
-    with pytest.raises(ValueError, match="手工分割|schema|混用"):
-        GalleryWriter(case_directory, case_id="case_001")
 
 
 def test_manual_gallery_writer_keeps_fov_exclusion_free_of_eus_fields(tmp_path):
@@ -278,7 +270,6 @@ def test_manual_gallery_writer_keeps_fov_exclusion_free_of_eus_fields(tmp_path):
     writer = GalleryWriter(
         case_directory,
         case_id="case_001",
-        manual_segmentation_enabled=True,
     )
 
     writer.write_fov_exclusion(
@@ -685,39 +676,3 @@ def test_rectangle_ply_writer_streams_a_single_pass_iterable(tmp_path):
     write_rectangles_ply(path, StreamingOnlyIterator())
 
     assert "element vertex 4" in path.read_text(encoding="utf-8")
-
-
-def _write_fake_2021(path):
-    path.write_text(
-        """
-class VesselTriplet:
-    def __init__(self, x, y, area, label=''):
-        self.x, self.y, self.area, self.label = x, y, area, label
-class FeatureVector:
-    def __init__(self, triplets=None, pose=None):
-        self.triplets, self.pose = triplets or [], pose
-class ProbePose:
-    def __init__(self, surface_point, rx, ry, rz, depth):
-        self.surface_point, self.rx, self.ry, self.rz, self.depth = surface_point, rx, ry, rz, depth
-class MultiLabelledCBIR:
-    def __init__(self, database, search_range=2):
-        self.database, self.search_range = database, search_range
-class HMMPoseEstimator:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-""".strip(),
-        encoding="utf-8",
-    )
-
-
-def test_registration_adapter_reads_gallery_jsonl_and_creates_cbir_database(tmp_path):
-    writer = GalleryWriter(tmp_path / "case_001", case_id="case_001")
-    writer.write_sample("sample", "stomach", np.zeros(3), np.array([0.0, 0.0, 1.0]), _frame(), _rendered(), QualityResult(True, None, 0.0))
-    module_path = tmp_path / "2021.py"
-    _write_fake_2021(module_path)
-
-    database = load_gallery_database(tmp_path / "case_001" / "gallery", module_path)
-
-    assert list(database.database) == ["portal:1"]
-    assert database.features[0].triplets[0].area == 9.0
-    assert database.create_cbir(search_range=4).search_range == 4

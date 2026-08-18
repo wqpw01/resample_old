@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from .config import EUS_VESSEL_IDS, ORGAN_BOUNDARY_IDS
+from .contract import BLACK_RATIO_LIMIT
 
 
 _GALLERY_IMAGE_FIELDS = (
@@ -356,8 +357,8 @@ def audit_output(
         errors.append(f"completed_pose_count {metadata.get('completed_pose_count')} != {manifest_lines}")
     if metadata.get("status_counts") != _counter_dict(status_counts):
         errors.append("run_metadata.status_counts 与根清单流式统计不一致")
-    if metadata.get("quality_filtering", {}).get("black_ratio_limit") != 0.6:
-        errors.append("black_ratio_limit 不是 0.6")
+    if metadata.get("quality_filtering", {}).get("black_ratio_limit") != BLACK_RATIO_LIMIT:
+        errors.append(f"black_ratio_limit 不是 {BLACK_RATIO_LIMIT}")
     if expected_core_design_sha256 is not None and metadata.get(
         "core_design_sha256"
     ) != expected_core_design_sha256:

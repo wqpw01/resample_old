@@ -21,14 +21,14 @@ def test_quality_accepts_black_pixels_below_fifty_percent():
     assert result.black_ratio == 0.40
 
 
-def test_quality_rejects_black_pixels_over_fifty_percent():
-    pixels = _pixels_with_black_ratio(0.51)
+def test_quality_rejects_black_pixels_over_sixty_percent():
+    pixels = _pixels_with_black_ratio(0.61)
 
     result = evaluate_ct_quality(pixels, FilterConfig())
 
     assert result.accepted is False
     assert result.reason == "black_ratio"
-    assert result.black_ratio == 0.51
+    assert result.black_ratio == 0.61
 
 
 def test_quality_rejects_long_vertical_boundary_with_black_on_one_side():
@@ -45,7 +45,7 @@ def test_quality_rejects_long_vertical_boundary_with_black_on_one_side():
 
 def test_quality_prioritizes_boundary_line_when_black_ratio_also_exceeds_limit():
     pixels = np.full((100, 100), 127, dtype=np.uint8)
-    pixels[:, :60] = 0
+    pixels[:, :61] = 0
 
     result = evaluate_ct_quality(pixels, FilterConfig())
 

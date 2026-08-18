@@ -17,7 +17,7 @@ import hashlib
 
 import numpy as np
 
-from .mesh_io import load_surface_mesh
+from ct_vascular_resampling.mesh_io import load_surface_mesh
 
 
 POINT_TOLERANCE_MM = 1e-5
@@ -42,13 +42,7 @@ ORGAN_COLORS: dict[str, tuple[int, int, int]] = {
     "esophagus": (178, 121, 162),
 }
 
-TARGET_ORGAN_COUNTS: dict[str, int] = {
-    "stomach": 118,
-    "liver": 162,
-    "pancreas": 37,
-    "duodenum": 53,
-    "esophagus": 30,
-}
+TARGET_ORGANS = tuple(ORGAN_COLORS)
 
 LEGACY_ORGAN_NAMES: dict[str, str] = {
     "stomach": "Stomach",
@@ -1183,7 +1177,7 @@ def read_surface_samples_ply(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
 def _validate_surface_samples(
     records: list[ZeroPlaneRecord], sample_ply_directory: Path
 ) -> None:
-    for organ in TARGET_ORGAN_COUNTS:
+    for organ in TARGET_ORGANS:
         organ_records = [record for record in records if record.organ == organ]
         source = sample_ply_directory / f"FPS-{LEGACY_ORGAN_NAMES[organ]}.ply"
         if not source.is_file():
@@ -1212,7 +1206,7 @@ def load_visualization_organ_meshes(
 
     source_directory = Path(directory)
     meshes: dict[str, Any] = {}
-    for organ in TARGET_ORGAN_COUNTS:
+    for organ in TARGET_ORGANS:
         source = source_directory / f"{organ}.ply"
         if not source.is_file():
             raise ValueError(f"缺少目标器官网格: {source}")
@@ -1257,8 +1251,9 @@ def _read_run_metadata(path: Path) -> dict[str, object]:
         raise ValueError("run_metadata.json 顶层必须是对象")
     if value.get("run_state") != "complete":
         raise ValueError("run_metadata.run_state 不是 complete")
-    if value.get("total_squares") != 1_431_118:
-        raise ValueError("run_metadata.total_squares 不是 1431118")
+    total_squares = value.get("total_squares")
+    if type(total_squares) is not int or total_squares <= 0:
+        raise ValueError("run_metadata.total_squares 必须是正整数")
     return value
 
 
@@ -1268,11 +1263,11 @@ def _readme_text(
     counts = Counter(record.organ for record in records)
     color_lines = [
         f"- {organ}: {counts[organ]} 个，RGB {list(_color(organ))}"
-        for organ in TARGET_ORGAN_COUNTS
+        for organ in TARGET_ORGANS
     ]
     return "\n".join(
         [
-            "病例 2 采样点与零度基准面可视化",
+            "采样点与零度基准面可视化",
             "=================================",
             "",
             "坐标与几何",
@@ -1293,9 +1288,9 @@ def _readme_text(
             "--------",
             "- sampling_points_zero_planes_interactive.html：离线交互三维视图。",
             "- sampling_points_zero_planes_*.png：等距、轴位、冠状位和矢状位视图。",
-            "- sampling_points.ply：400 个采样点，含输入法向量、RGB 和器官编号。",
-            "- zero_planes_edges.ply：400 个零度面的边框。",
-            "- zero_planes_faces.ply：400 个零度面的四边形面。",
+            f"- sampling_points.ply：{len(records)} 个采样点，含输入法向量、RGB 和器官编号。",
+            f"- zero_planes_edges.ply：{len(records)} 个零度面的边框。",
+            f"- zero_planes_faces.ply：{len(records)} 个零度面的四边形面。",
             "- sampling_points_zero_planes.csv/json：完整点、局部轴和四顶点数据。",
             "- target_organ_meshes：五个目标器官网格，作为空间参照。",
             "",
@@ -1352,7 +1347,19 @@ def export_visualization_bundle(
         shutil.rmtree(staging)
     try:
         raw_records = load_zero_record_jsonl(zero_records_jsonl)
-        records = select_zero_planes(raw_records, TARGET_ORGAN_COUNTS)
+        zero_counts = Counter(
+            str(record.get("organ"))
+            for record in raw_records
+            if isinstance(record, Mapping) and _is_zero_pose(record)
+        )
+        unexpected_organs = sorted(set(zero_counts) - set(TARGET_ORGANS))
+        missing_organs = sorted(set(TARGET_ORGANS) - set(zero_counts))
+        if unexpected_organs or missing_organs:
+            raise ValueError(
+                f"零度面器官集合无效: missing={missing_organs}, unexpected={unexpected_organs}"
+            )
+        expected_counts = {organ: zero_counts[organ] for organ in TARGET_ORGANS}
+        records = select_zero_planes(raw_records, expected_counts)
         _validate_surface_samples(records, Path(sample_ply_directory))
         metadata = _read_run_metadata(Path(run_metadata_path))
         provenance = _validate_provenance(
@@ -1385,7 +1392,7 @@ def export_visualization_bundle(
         render_static_views(records, meshes, staging)
         mesh_output = staging / "target_organ_meshes"
         mesh_output.mkdir()
-        for organ in TARGET_ORGAN_COUNTS:
+        for organ in TARGET_ORGANS:
             meshes[organ].export(mesh_output / f"{organ}.ply", file_type="ply")
         _atomic_text(staging / "README_中文.txt", _readme_text(records, provenance))
         _write_sha256_manifest(staging)
@@ -1396,6 +1403,6 @@ def export_visualization_bundle(
     return {
         "output_directory": str(destination),
         "record_count": len(records),
-        "organ_counts": dict(TARGET_ORGAN_COUNTS),
+        "organ_counts": dict(expected_counts),
         "source_manifest_sha256": provenance["source_manifest_sha256"],
     }

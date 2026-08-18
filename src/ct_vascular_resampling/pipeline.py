@@ -22,21 +22,18 @@ import trimesh
 
 from .artifacts import write_square_samples_ply, write_surface_samples_ply
 from .config import (
-    DEFAULT_ORGAN_COLORS,
-    ORGAN_BOUNDARY_IDS,
-    ORGAN_BOUNDARY_MODEL_IDS,
     CTConfig,
     CaseConfig,
     FilterConfig,
     ManualSegmentationConfig,
 )
+from .contract import CORE_DESIGN_FILENAME, CORE_DESIGN_SHA256
 from .coordinates import to_ras_direction, to_ras_points
 from .ct_resampling import (
     CTVolume,
     diagnose_square_fov,
     hu_to_grayscale,
     load_ct,
-    sample_ct_square,
     square_vertices_inside_ct,
 )
 from .eus_organs import (
@@ -45,13 +42,8 @@ from .eus_organs import (
     load_eus_organ_catalog,
 )
 from .fov_diagnostics import assess_rejected_fov
-from .gallery import (
-    GalleryWriter,
-    validate_gallery_eus_vessel_metadata,
-    validate_gallery_organ_metadata,
-    write_rectangles_ply,
-)
-from .geometry import frame_from_vertices, intersect_mesh_with_square, mesh_bounds_may_intersect_square
+from .gallery import GalleryWriter, write_rectangles_ply
+from .geometry import frame_from_vertices, intersect_mesh_with_square
 from .label_resampling import (
     CpuLabelBackend,
     LabelSamplingBackend,
@@ -62,15 +54,12 @@ from .label_resampling import (
 )
 from .manual_segmentation import analyze_manual_label_plane, apply_manual_label_analysis
 from .mesh_io import load_surface_mesh
+from .indexing import build_library_summary
 from .quality import evaluate_ct_quality
 from .resampling_backend import CachedCpuBackend, create_sampling_backend, validate_backend_against_cpu
-from .rendering import OrganLayer, VesselLayer, render_sample_images
+from .rendering import VesselLayer, render_sample_images
 from .sampling_pipeline import ORGAN_ORDER, PoseStream, SquareSample, SurfaceSamples, generate_square_samples, sample_organs
 from .squares import PITCH_ANGLES_DEGREES, ROLL_ANGLES_DEGREES, YAW_ANGLES_DEGREES
-
-
-CORE_DESIGN_FILENAME = "基于目标器官的采样方法-20260813.docx"
-CORE_DESIGN_SHA256 = "de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca"
 
 
 @cache
@@ -175,13 +164,12 @@ def _input_provenance(config: CaseConfig) -> dict[str, object]:
             for vessel in config.vessel_models
         ],
     }
-    if config.manual_segmentation is not None:
-        segmentation_path = config.manual_segmentation.path.resolve()
-        provenance["manual_segmentation"] = {
-            "path": str(segmentation_path),
-            "kind": "file",
-            "sha256": _sha256_file_contents(segmentation_path),
-        }
+    segmentation_path = config.manual_segmentation.path.resolve()
+    provenance["manual_segmentation"] = {
+        "path": str(segmentation_path),
+        "kind": "file",
+        "sha256": _sha256_file_contents(segmentation_path),
+    }
     return provenance
 
 
@@ -401,15 +389,6 @@ class PreparedVessel:
     mesh: trimesh.Trimesh
 
 
-@dataclass(frozen=True)
-class PreparedOrgan:
-    identifier: str
-    label: str
-    color: tuple[int, int, int]
-    mesh: trimesh.Trimesh
-    bounds: np.ndarray
-
-
 MeshCache = dict[tuple[Path, str], trimesh.Trimesh]
 
 
@@ -445,23 +424,6 @@ def _load_prepared_vessels(
         )
         for vessel in config.vessel_models
     ]
-
-
-def _load_prepared_organs(
-    config: CaseConfig,
-    mesh_cache: MeshCache | None = None,
-) -> list[PreparedOrgan]:
-    organs: list[PreparedOrgan] = []
-    for label, model_id in ORGAN_BOUNDARY_MODEL_IDS.items():
-        mesh = _load_cached_mesh(
-            config.organ_models[model_id],
-            config.geometry.input_coordinate_system,
-            mesh_cache,
-        )
-        organs.append(
-            PreparedOrgan(model_id, label, DEFAULT_ORGAN_COLORS[label], mesh, mesh.bounds.copy())
-        )
-    return organs
 
 
 @dataclass(frozen=True)
@@ -508,36 +470,6 @@ def _render_fov_exclusion_if_needed(
     )
 
 
-def render_square_sample(
-    sample: SquareSample,
-    volume: CTVolume,
-    vessels: Iterable[PreparedVessel],
-    ct_settings: CTConfig,
-    filter_settings: FilterConfig,
-    writer: GalleryWriter,
-    *,
-    organs: Iterable[PreparedOrgan] = (),
-) -> str:
-    """将一个方形同步转换为 CT、边界、特征和最终图库状态。"""
-
-    completed = writer.completed_status(sample.sample_id)
-    if completed is not None:
-        return completed
-    frame = frame_from_vertices(sample.vertices)
-    hu = sample_ct_square(volume, frame.vertices, ct_settings.output_resolution, ct_settings.fill_hu_value)
-    return render_precomputed_square(
-        sample,
-        hu,
-        vessels,
-        ct_settings,
-        filter_settings,
-        writer,
-        organs=organs,
-        resampling_backend="cpu",
-        volume=volume,
-    )
-
-
 def render_precomputed_square(
     sample: SquareSample,
     hu: np.ndarray,
@@ -546,11 +478,10 @@ def render_precomputed_square(
     filter_settings: FilterConfig,
     writer: GalleryWriter,
     *,
-    organs: Iterable[PreparedOrgan] = (),
     resampling_backend: str | None = None,
     volume: CTVolume | None = None,
     label_plane: np.ndarray | None = None,
-    manual_segmentation: ManualSegmentationConfig | None = None,
+    manual_segmentation: ManualSegmentationConfig,
 ) -> str:
     """以已重采样的 HU 方形生成 CT、边界、特征和最终图库状态。"""
 
@@ -590,26 +521,13 @@ def render_precomputed_square(
         else []
     )
     has_complete_vessel = any(contour.complete for layer in vessel_layers for contour in layer.contours)
-    organ_layers = []
-    if has_complete_vessel and manual_segmentation is None:
-        organ_layers = [
-            OrganLayer(
-                organ.identifier,
-                organ.label,
-                organ.color,
-                intersect_mesh_with_square(organ.mesh, frame),
-            )
-            for organ in organs
-            if mesh_bounds_may_intersect_square(organ.bounds, frame)
-        ]
     rendered = render_sample_images(
         ct_pixels,
         frame.width_mm,
         frame.length_mm,
         vessel_layers,
-        organ_layers=organ_layers,
     )
-    if has_complete_vessel and manual_segmentation is not None:
+    if has_complete_vessel:
         if label_plane is None:
             raise ValueError("手工分割 Gallery 样本缺少标签平面")
         analysis = analyze_manual_label_plane(
@@ -642,59 +560,6 @@ def _write_json_atomic(destination: Path, value: dict) -> None:
 
 def _write_run_metadata(case_directory: Path, metadata: dict) -> None:
     _write_json_atomic(case_directory / "run_metadata.json", metadata)
-
-
-def _gallery_organ_label_counts(gallery_manifest: Path) -> tuple[Counter[str], Counter[str]]:
-    """严格校验 Gallery 器官 schema，并按切面累计通用与 EUS 候选标签。"""
-
-    organ_counts, candidate_counts, _, _ = _gallery_label_counts(
-        gallery_manifest,
-        manual_segmentation_enabled=False,
-    )
-    return organ_counts, candidate_counts
-
-
-def _gallery_label_counts(
-    gallery_manifest: Path,
-    *,
-    manual_segmentation_enabled: bool,
-) -> tuple[Counter[str], Counter[str], Counter[str], Counter[str]]:
-    """逐行严格校验 Gallery，并累计器官及手工 EUS 血管计数。"""
-
-    organ_label_counts: Counter[str] = Counter()
-    eus_candidate_organ_label_counts: Counter[str] = Counter()
-    eus_vessel_label_counts: Counter[str] = Counter()
-    eus_vessel_feature_counts: Counter[str] = Counter()
-    catalog = load_eus_organ_catalog()
-    with gallery_manifest.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-                if record.get("status") != "gallery":
-                    raise ValueError("gallery.jsonl 记录状态必须为 gallery")
-                validate_gallery_organ_metadata(record, gallery_manifest.parent, catalog)
-                if manual_segmentation_enabled:
-                    validate_gallery_eus_vessel_metadata(record, gallery_manifest.parent)
-                elif any(str(field).startswith("eus_vessel_") for field in record):
-                    raise ValueError("旧模式 Gallery 不得包含手工 EUS 血管字段")
-            except (json.JSONDecodeError, AttributeError, ValueError) as error:
-                raise ValueError(f"gallery 清单第 {line_number} 行损坏: {error}") from error
-            organ_label_counts.update(record["organ_labels"])
-            eus_candidate_organ_label_counts.update(record["eus_candidate_organ_labels"])
-            if manual_segmentation_enabled:
-                eus_vessel_label_counts.update(record["eus_vessel_labels"])
-                eus_vessel_feature_counts.update(
-                    str(feature["label"])
-                    for feature in record["eus_vessel_features"]
-                )
-    return (
-        organ_label_counts,
-        eus_candidate_organ_label_counts,
-        eus_vessel_label_counts,
-        eus_vessel_feature_counts,
-    )
 
 
 def _metadata_with_state(
@@ -731,11 +596,11 @@ def _preflight(config: CaseConfig) -> None:
     for vessel in config.vessel_models:
         if not vessel.path.is_file():
             raise FileNotFoundError(f"血管模型不存在 ({vessel.identifier}): {vessel.path}")
-    if config.manual_segmentation is not None and not config.manual_segmentation.path.is_file():
+    if not config.manual_segmentation.path.is_file():
         raise FileNotFoundError(f"手工分割标签文件不存在: {config.manual_segmentation.path}")
 
 
-def _legacy_name(organ: str) -> str:
+def _artifact_name(organ: str) -> str:
     return organ[:1].upper() + organ[1:]
 
 
@@ -788,11 +653,6 @@ def recover_interrupted_run_metadata(
     metadata_path = config.output_root / config.case_id / "run_metadata.json"
     if metadata_path.exists():
         raise FileExistsError(f"运行元数据已存在，拒绝覆盖: {metadata_path}")
-    if config.manual_segmentation is not None:
-        raise ValueError(
-            "手工分割运行缺少原始 run_metadata.json，无法证明 segmentation、映射、颜色和阈值协议；"
-            "拒绝重建元数据，请使用保留的原始元数据或新的输出目录"
-        )
     if recovered_at_utc is None:
         recovered_at_utc = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     else:
@@ -809,7 +669,6 @@ def recover_interrupted_run_metadata(
         config.case_id,
         required_core_design_sha256=CORE_DESIGN_SHA256,
         repair_missing_state_records=False,
-        manual_segmentation_enabled=config.manual_segmentation is not None,
     )
     statuses = Counter(writer.completed_statuses.values())
     if sum(statuses.values()) != expected_completed_count:
@@ -926,7 +785,6 @@ def run_case(
             case_directory,
             config.case_id,
             required_core_design_sha256=CORE_DESIGN_SHA256,
-            manual_segmentation_enabled=config.manual_segmentation is not None,
         )
         if writer.completed_statuses:
             assert previous_metadata is not None
@@ -974,11 +832,11 @@ def run_case(
     if "sample" in selected:
         for organ in ORGAN_ORDER:
             surface = surfaces.get(organ, SurfaceSamples([], []))
-            write_surface_samples_ply(case_directory / "ResampledpointPLY" / f"FPS-{_legacy_name(organ)}.ply", surface)
+            write_surface_samples_ply(case_directory / "ResampledpointPLY" / f"FPS-{_artifact_name(organ)}.ply", surface)
     if "square" in selected:
         for organ in ORGAN_ORDER:
             organ_squares = (sample for sample in samples if sample.organ == organ)
-            write_square_samples_ply(case_directory / "squarePLY" / f"{_legacy_name(organ)}-vertex.ply", organ_squares)
+            write_square_samples_ply(case_directory / "squarePLY" / f"{_artifact_name(organ)}-vertex.ply", organ_squares)
         write_rectangles_ply(
             case_directory / "rectangles.ply",
             (frame_from_vertices(sample.vertices) for sample in samples),
@@ -990,20 +848,13 @@ def run_case(
             dicom_series_uid=config.dicom_series_uid,
             input_coordinate_system=config.geometry.input_coordinate_system,
         )
-        label_volume = None
-        if config.manual_segmentation is not None:
-            label_volume = load_label_volume(
-                config.manual_segmentation.path,
-                input_coordinate_system=config.geometry.input_coordinate_system,
-            )
-            validate_label_geometry(volume, label_volume)
+        label_volume = load_label_volume(
+            config.manual_segmentation.path,
+            input_coordinate_system=config.geometry.input_coordinate_system,
+        )
+        validate_label_geometry(volume, label_volume)
         mesh_cache: MeshCache = {}
         vessels = _load_prepared_vessels(config, mesh_cache)
-        organs = (
-            []
-            if config.manual_segmentation is not None
-            else _load_prepared_organs(config, mesh_cache)
-        )
         effective_workers = workers if workers is not None else config.runtime.workers
         if effective_workers < 1:
             raise ValueError("workers 必须大于零")
@@ -1126,7 +977,6 @@ def run_case(
                 config.ct,
                 config.filtering,
                 writer,
-                organs=organs,
                 resampling_backend=backend_name,
                 volume=volume,
                 label_plane=label_plane,
@@ -1264,68 +1114,11 @@ def run_case(
             )
     indexed_feature_count = 0
     if "index" in selected:
-        gallery_manifest = case_directory / "gallery" / "gallery.jsonl"
-        label_counts: Counter[str] = Counter()
-        organ_label_counts: Counter[str] = Counter()
-        eus_candidate_organ_label_counts: Counter[str] = Counter()
-        eus_vessel_label_counts: Counter[str] = Counter()
-        eus_vessel_feature_counts: Counter[str] = Counter()
-        if gallery_manifest.is_file():
-            from .registration_adapter import load_gallery_database
-
-            (
-                organ_label_counts,
-                eus_candidate_organ_label_counts,
-                eus_vessel_label_counts,
-                eus_vessel_feature_counts,
-            ) = _gallery_label_counts(
-                gallery_manifest,
-                manual_segmentation_enabled=config.manual_segmentation is not None,
-            )
-            database = load_gallery_database(gallery_manifest, config.registration_module_path)
-            indexed_feature_count = len(database.features)
-            for feature in database.features:
-                label_counts.update(str(triplet.label) for triplet in feature.triplets)
-        eus_catalog = load_eus_organ_catalog()
-        library_summary: dict[str, object] = {
-            "case_id": config.case_id,
-            "gallery_manifest": "gallery/gallery.jsonl",
-            "gallery_manifest_exists": gallery_manifest.is_file(),
-            "indexed_feature_count": indexed_feature_count,
-            "feature_label_counts": dict(sorted(label_counts.items())),
-            "organ_label_counts": dict(sorted(organ_label_counts.items())),
-            "eus_candidate_organ_label_counts": dict(
-                sorted(eus_candidate_organ_label_counts.items())
-            ),
-            "eus_possible_organs": eus_catalog.to_record(),
-            "organ_boundary_colors": {
-                identifier: list(DEFAULT_ORGAN_COLORS[identifier]) for identifier in ORGAN_BOUNDARY_IDS
-            },
-        }
-        if config.manual_segmentation is not None:
-            library_summary.update(
-                {
-                    "eus_vessel_label_counts": dict(sorted(eus_vessel_label_counts.items())),
-                    "eus_vessel_feature_counts": dict(sorted(eus_vessel_feature_counts.items())),
-                    "eus_vessel_colors": {
-                        identifier: list(color)
-                        for identifier, color in sorted(
-                            config.manual_segmentation.eus_vessel_colors.items()
-                        )
-                    },
-                    "eus_vessel_label_values": {
-                        identifier: list(values)
-                        for identifier, values in sorted(
-                            config.manual_segmentation.eus_vessel_label_values.items()
-                        )
-                    },
-                    "manual_organ_label_values": {
-                        identifier: list(values)
-                        for identifier, values in sorted(
-                            config.manual_segmentation.organ_label_values.items()
-                        )
-                    },
-                }
-            )
+        library_summary = build_library_summary(
+            case_id=config.case_id,
+            case_directory=case_directory,
+            manual_segmentation=config.manual_segmentation,
+        )
+        indexed_feature_count = int(library_summary["indexed_feature_count"])
         _write_json_atomic(case_directory / "library_summary.json", library_summary)
     return RunSummary(config.case_id, sampled_counts, len(samples), dict(statuses), False, indexed_feature_count)

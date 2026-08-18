@@ -20,14 +20,6 @@ class VesselLayer:
 
 
 @dataclass(frozen=True)
-class OrganLayer:
-    identifier: str
-    label: str
-    color: tuple[int, int, int]
-    contours: list[SectionContour]
-
-
-@dataclass(frozen=True)
 class RenderedSample:
     ct: Image.Image
     boundary_only: Image.Image
@@ -57,7 +49,6 @@ def render_sample_images(
     width_mm: float,
     length_mm: float,
     layers: Iterable[VesselLayer],
-    organ_layers: Iterable[OrganLayer] = (),
 ) -> RenderedSample:
     """在同一物理坐标范围内生成 CT、分层边界图和截面特征。"""
 
@@ -74,14 +65,6 @@ def render_sample_images(
     combined_draw = ImageDraw.Draw(organ_vessel_boundary)
     overlay_draw = ImageDraw.Draw(overlay)
     line_width = max(1, round(min(ct.size) / 150.0))
-    organ_labels: set[str] = set()
-    for layer in organ_layers:
-        for contour in layer.contours:
-            points = _to_pixels(contour.points_mm, width_mm, length_mm, ct.size)
-            if len(points) >= 2:
-                combined_draw.line(points + [points[0]], fill=layer.color, width=line_width)
-            if len(points) >= 3 and contour.area_mm2 > 0.0:
-                organ_labels.add(layer.label)
     features: list[dict[str, float | str]] = []
     for layer in layers:
         for contour in layer.contours:
@@ -106,5 +89,5 @@ def render_sample_images(
         ct_overlay=overlay,
         organ_vessel_boundary=organ_vessel_boundary,
         features=features,
-        organ_labels=sorted(organ_labels),
+        organ_labels=[],
     )

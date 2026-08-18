@@ -7,17 +7,21 @@ from dataclasses import dataclass
 import numpy as np
 
 from .centerline import CenterlinePath
+from .contract import (
+    PITCH_ANGLES_DEGREES,
+    ROLL_ANGLES_DEGREES,
+    SPECIAL_YAW_ANGLES_DEGREES,
+    STANDARD_YAW_ANGLES_DEGREES,
+)
 
 
 STANDARD_YAW = "standard"
 DUODENUM_BULB_YAW = "duodenum_bulb"
 PANCREAS_SPECIAL_YAW = "pancreas_special"
-ROLL_ANGLES_DEGREES = tuple(float(value) for value in range(-45, 46, 5))
-PITCH_ANGLES_DEGREES = tuple(float(value) for value in range(-30, 31, 5))
 YAW_ANGLES_DEGREES = {
-    STANDARD_YAW: tuple(float(value) for value in range(-30, 31, 5)),
-    DUODENUM_BULB_YAW: tuple(float(value) for value in range(-120, 31, 5)),
-    PANCREAS_SPECIAL_YAW: tuple(float(value) for value in range(-120, 31, 5)),
+    STANDARD_YAW: STANDARD_YAW_ANGLES_DEGREES,
+    DUODENUM_BULB_YAW: SPECIAL_YAW_ANGLES_DEGREES,
+    PANCREAS_SPECIAL_YAW: SPECIAL_YAW_ANGLES_DEGREES,
 }
 
 

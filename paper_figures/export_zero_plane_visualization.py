@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""导出病例 2 采样点与零度基准面的本地可视化交付包。"""
+"""导出采样点与零度基准面的论文制图包。"""
 
 from __future__ import annotations
 
@@ -10,9 +10,11 @@ import sys
 
 
 if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    repository = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repository))
+    sys.path.insert(0, str(repository / "src"))
 
-from ct_vascular_resampling.zero_plane_visualization import export_visualization_bundle
+from paper_figures.zero_plane_visualization import export_visualization_bundle
 
 
 def build_parser() -> argparse.ArgumentParser:

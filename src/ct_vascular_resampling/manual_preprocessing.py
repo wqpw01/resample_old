@@ -14,6 +14,8 @@ import numpy as np
 import SimpleITK as sitk
 import yaml
 
+from .contract import BLACK_RATIO_LIMIT
+from .ct_resampling import read_ct_image
 from .preprocessing import _case_config, build_binary_masks, mask_to_mesh, validate_geometry
 
 
@@ -56,12 +58,31 @@ def _required_file(path: str | Path, description: str) -> Path:
     return source
 
 
-def _sha256_file(path: Path) -> str:
+def _required_ct(path: str | Path) -> Path:
+    source = Path(path).expanduser().resolve()
+    if not source.is_file() and not source.is_dir():
+        raise FileNotFoundError(f"CT 输入不存在: {source}")
+    return source
+
+
+def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    if path.is_file():
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+    if path.is_dir():
+        digest.update(b"directory\0")
+        for candidate in sorted(item for item in path.rglob("*") if item.is_file()):
+            relative = candidate.relative_to(path).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            with candidate.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+        return digest.hexdigest()
+    raise FileNotFoundError(f"输入不存在: {path}")
 
 
 def _geometry_record(image: sitk.Image) -> dict[str, list[int] | list[float]]:
@@ -77,18 +98,19 @@ def _manual_case_config(
     *,
     case_id: str,
     ct_path: Path,
+    dicom_series_uid: str | None,
     segmentation_relative_path: str,
     artery_model_path: Path,
     vein_model_path: Path,
-    registration_module_path: Path,
     output_root: str | Path,
 ) -> dict[str, Any]:
     config = _case_config(
         case_id,
-        registration_module_path,
         output_root=str(Path(output_root).expanduser().resolve()),
     )
     config["ct_path"] = str(ct_path)
+    if dicom_series_uid is not None:
+        config["dicom_series_uid"] = dicom_series_uid
     config["organ_models"] = {
         model_id: f"models/{model_id}.ply"
         for model_id in MANUAL_ORGAN_MODEL_IDS.values()
@@ -107,7 +129,7 @@ def _manual_case_config(
             "color": [0, 188, 212],
         },
     ]
-    config["filtering"]["black_ratio_limit"] = 0.60
+    config["filtering"]["black_ratio_limit"] = BLACK_RATIO_LIMIT
     config["manual_segmentation"] = {
         "path": segmentation_relative_path,
         "organ_label_values": {
@@ -129,11 +151,11 @@ def _manual_case_config(
 def write_manual_segmentation_case(
     *,
     ct_path: str | Path,
+    dicom_series_uid: str | None = None,
     segmentation_path: str | Path,
     artery_model_path: str | Path,
     vein_model_path: str | Path,
     output_directory: str | Path,
-    registration_module_path: str | Path,
     output_root: str | Path,
     case_id: str,
 ) -> dict[str, object]:
@@ -141,17 +163,16 @@ def write_manual_segmentation_case(
 
     if not isinstance(case_id, str) or not case_id.strip():
         raise ValueError("case_id 必须是非空字符串")
-    ct_source = _required_file(ct_path, "CT 文件")
+    ct_source = _required_ct(ct_path)
     segmentation_source = _required_file(segmentation_path, "手工分割文件")
     artery_source = _required_file(artery_model_path, "外部 artery_tree 模型")
     vein_source = _required_file(vein_model_path, "外部 vein_tree 模型")
-    registration_source = _required_file(registration_module_path, "检索模块")
 
     destination = Path(output_directory).expanduser().resolve()
     if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
         raise FileExistsError(f"输出目录已有内容: {destination}")
 
-    ct = sitk.ReadImage(str(ct_source))
+    ct = read_ct_image(ct_source, dicom_series_uid=dicom_series_uid)
     segmentation = sitk.ReadImage(str(segmentation_source))
     validate_geometry(ct, segmentation)
     labels = sitk.GetArrayViewFromImage(segmentation)
@@ -187,8 +208,8 @@ def write_manual_segmentation_case(
 
         copied_segmentation = segmentation_directory / "EUS-main-organ.seg.nrrd"
         shutil.copyfile(segmentation_source, copied_segmentation)
-        segmentation_sha256 = _sha256_file(segmentation_source)
-        if _sha256_file(copied_segmentation) != segmentation_sha256:
+        segmentation_sha256 = _sha256_path(segmentation_source)
+        if _sha256_path(copied_segmentation) != segmentation_sha256:
             raise OSError("手工分割逐字节复制校验失败")
 
         organ_records: dict[str, dict[str, object]] = {}
@@ -215,17 +236,19 @@ def write_manual_segmentation_case(
         config = _manual_case_config(
             case_id=case_id.strip(),
             ct_path=ct_source,
+            dicom_series_uid=dicom_series_uid,
             segmentation_relative_path=segmentation_relative_path,
             artery_model_path=artery_source,
             vein_model_path=vein_source,
-            registration_module_path=registration_source,
             output_root=output_root,
         )
         manifest = {
             "case_id": case_id.strip(),
             "ct": {
                 "path": str(ct_source),
-                "sha256": _sha256_file(ct_source),
+                "kind": "directory" if ct_source.is_dir() else "file",
+                "dicom_series_uid": dicom_series_uid,
+                "sha256": _sha256_path(ct_source),
                 "geometry": _geometry_record(ct),
             },
             "segmentation": {
@@ -242,11 +265,11 @@ def write_manual_segmentation_case(
             "external_vessel_models": {
                 "artery_tree": {
                     "path": str(artery_source),
-                    "sha256": _sha256_file(artery_source),
+                    "sha256": _sha256_path(artery_source),
                 },
                 "vein_tree": {
                     "path": str(vein_source),
-                    "sha256": _sha256_file(vein_source),
+                    "sha256": _sha256_path(vein_source),
                 },
             },
         }

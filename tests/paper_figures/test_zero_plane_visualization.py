@@ -12,8 +12,8 @@ from PIL import Image
 import pytest
 import trimesh
 
-from ct_vascular_resampling import zero_plane_visualization as visualization
-from ct_vascular_resampling.zero_plane_visualization import (
+from paper_figures import zero_plane_visualization as visualization
+from paper_figures.zero_plane_visualization import (
     load_visualization_organ_meshes,
     project_orthographic,
     render_interactive_html,
@@ -393,7 +393,7 @@ def _write_surface_ply(path: Path, records: list[dict]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_cli_exports_complete_case2_bundle(tmp_path):
+def test_cli_exports_complete_parameterized_bundle(tmp_path):
     inputs = tmp_path / "input"
     samples = inputs / "ResampledpointPLY"
     meshes = inputs / "target_organ_meshes"
@@ -421,7 +421,7 @@ def test_cli_exports_complete_case2_bundle(tmp_path):
         json.dumps(
             {
                 "run_state": "complete",
-                "total_squares": 1431118,
+            "total_squares": 987654,
                 "input_coordinate_system": "RAS",
                 "core_design_sha256": "b" * 64,
                 "build_git_commit": "c" * 40,
@@ -434,7 +434,7 @@ def test_cli_exports_complete_case2_bundle(tmp_path):
     completed = subprocess.run(
         [
             sys.executable,
-            "scripts/export_zero_plane_visualization.py",
+            "paper_figures/export_zero_plane_visualization.py",
             "--zero-records-jsonl",
             str(zero_records),
             "--sample-ply-dir",
@@ -448,7 +448,7 @@ def test_cli_exports_complete_case2_bundle(tmp_path):
             "--output-dir",
             str(output),
         ],
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=Path(__file__).resolve().parents[2],
         check=False,
         capture_output=True,
         text=True,

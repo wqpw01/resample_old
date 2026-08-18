@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CT 血管重采样项目入口。"""
+"""手工分割 CT-EUS 完整重采样兼容入口。"""
 
 from pathlib import Path
 import sys

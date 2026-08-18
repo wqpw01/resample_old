@@ -18,8 +18,8 @@ def test_main_cli_exposes_case_config_dry_run_and_steps():
 
     assert result.returncode == 0
     assert "--case-config" in result.stdout
-    assert "--auto-case-config" in result.stdout
-    assert "--rejected-audit-config" in result.stdout
+    assert "--auto-case-config" not in result.stdout
+    assert "--rejected-audit-config" not in result.stdout
     assert "--dry-run" in result.stdout
     assert "--steps" in result.stdout
     assert "--backend" in result.stdout
@@ -59,11 +59,11 @@ def test_manual_preprocessing_cli_exposes_inputs_and_explicit_overwrite():
     assert result.returncode == 0
     for option in (
         "--ct",
+        "--dicom-series-uid",
         "--segmentation",
         "--artery-model",
         "--vein-model",
         "--output",
-        "--registration-module",
         "--output-root",
         "--case-id",
         "--overwrite",
@@ -91,8 +91,6 @@ def test_manual_preprocessing_cli_refuses_nonempty_output_without_overwrite(tmp_
             str(tmp_path / "vein.ply"),
             "--output",
             str(output),
-            "--registration-module",
-            str(tmp_path / "2021.py"),
             "--output-root",
             str(tmp_path / "gallery"),
             "--case-id",

@@ -91,13 +91,12 @@ class SquareFovDiagnosis:
         }
 
 
-def load_ct(
+def read_ct_image(
     path: str | Path,
     *,
     dicom_series_uid: str | None = None,
-    input_coordinate_system: str = "RAS",
-) -> CTVolume:
-    """读取 NIfTI、NRRD 或指定 DICOM 序列，保持原始物理空间。"""
+) -> sitk.Image:
+    """读取 NIfTI、NRRD 或指定 DICOM 序列为原生 SimpleITK 图像。"""
 
     source = Path(path)
     if source.is_dir():
@@ -117,7 +116,7 @@ def load_ct(
         if not filenames:
             raise ValueError(f"DICOM Series UID 没有切片文件: {selected_series_uid}")
         reader.SetFileNames(filenames)
-        return CTVolume.from_sitk(reader.Execute(), input_coordinate_system=input_coordinate_system)
+        return reader.Execute()
     if not source.is_file():
         raise FileNotFoundError(f"CT 文件不存在: {source}")
     if dicom_series_uid is not None:
@@ -125,7 +124,21 @@ def load_ct(
     name = source.name.lower()
     if not name.endswith((".nii", ".nii.gz", ".nrrd")):
         raise ValueError(f"仅支持 NIfTI 或 NRRD CT: {source}")
-    return CTVolume.from_sitk(sitk.ReadImage(str(source)), input_coordinate_system=input_coordinate_system)
+    return sitk.ReadImage(str(source))
+
+
+def load_ct(
+    path: str | Path,
+    *,
+    dicom_series_uid: str | None = None,
+    input_coordinate_system: str = "RAS",
+) -> CTVolume:
+    """读取 CT 并保留其原始物理空间。"""
+
+    return CTVolume.from_sitk(
+        read_ct_image(path, dicom_series_uid=dicom_series_uid),
+        input_coordinate_system=input_coordinate_system,
+    )
 
 
 def sample_ct_square(

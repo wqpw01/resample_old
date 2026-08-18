@@ -10,7 +10,6 @@ import SimpleITK as sitk
 import trimesh
 from pathlib import Path
 from dataclasses import replace
-from types import SimpleNamespace
 
 from ct_vascular_resampling.config import (
     CTConfig,
@@ -18,6 +17,7 @@ from ct_vascular_resampling.config import (
     FilterConfig,
     GeometryConfig,
     ManualSegmentationConfig,
+    ORGAN_BOUNDARY_IDS,
     RuntimeConfig,
     SamplingConfig,
     SquareConfig,
@@ -28,7 +28,7 @@ from ct_vascular_resampling.ct_resampling import CTVolume, diagnose_square_fov
 from ct_vascular_resampling.gallery import GalleryWriter
 from ct_vascular_resampling.label_resampling import CpuLabelBackend
 import ct_vascular_resampling.pipeline as pipeline_module
-from ct_vascular_resampling.pipeline import PreparedVessel, render_precomputed_square, render_square_sample, run_case
+from ct_vascular_resampling.pipeline import PreparedVessel, render_precomputed_square, run_case
 from ct_vascular_resampling.resampling_backend import CachedCpuBackend
 from ct_vascular_resampling.sampling_pipeline import SquareSample, SurfaceSamples
 
@@ -65,184 +65,6 @@ def _manual_segmentation_config(path: Path) -> ManualSegmentationConfig:
     )
 
 
-def test_gallery_organ_summary_counts_slices_and_rejects_legacy_records(tmp_path):
-    gallery_directory = tmp_path / "gallery"
-    combined_directory = gallery_directory / "organ_vessel_boundary"
-    combined_directory.mkdir(parents=True)
-    for sample_id in ("first", "second"):
-        Image.new("RGB", (10, 10), "white").save(combined_directory / f"{sample_id}.png")
-    records = [
-        {
-            "slice_id": "first",
-            "status": "gallery",
-            "organ_metadata_schema_version": "eus-organ-metadata/v1",
-            "organ_vessel_boundary_png": "organ_vessel_boundary/first.png",
-            "organ_labels": ["liver", "stomach"],
-            "eus_candidate_organ_labels": ["liver"],
-        },
-        {
-            "slice_id": "second",
-            "status": "gallery",
-            "organ_metadata_schema_version": "eus-organ-metadata/v1",
-            "organ_vessel_boundary_png": "organ_vessel_boundary/second.png",
-            "organ_labels": ["liver"],
-            "eus_candidate_organ_labels": ["liver"],
-        },
-    ]
-    manifest = gallery_directory / "gallery.jsonl"
-    manifest.write_text(
-        "".join(json.dumps(record) + "\n" for record in records),
-        encoding="utf-8",
-    )
-
-    organ_counts, eus_counts = pipeline_module._gallery_organ_label_counts(manifest)
-
-    assert organ_counts == Counter({"liver": 2, "stomach": 1})
-    assert eus_counts == Counter({"liver": 2})
-
-    manifest.write_text(
-        json.dumps({"slice_id": "legacy", "status": "gallery", "organ_labels": ["liver"]})
-        + "\n",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="旧版|schema"):
-        pipeline_module._gallery_organ_label_counts(manifest)
-
-
-def test_prepared_organs_use_canonical_labels_and_existing_model_paths(monkeypatch, tmp_path):
-    mesh = trimesh.creation.box()
-    organ_models = {
-        identifier: tmp_path / f"{identifier}.ply"
-        for identifier in pipeline_module.ORGAN_BOUNDARY_MODEL_IDS.values()
-    }
-    loaded_paths = []
-
-    def load(path, *, input_coordinate_system):
-        loaded_paths.append((path, input_coordinate_system))
-        return SimpleNamespace(mesh=mesh.copy())
-
-    monkeypatch.setattr(pipeline_module, "load_surface_mesh", load)
-    config = SimpleNamespace(
-        organ_models=organ_models,
-        geometry=SimpleNamespace(input_coordinate_system="LPS"),
-    )
-
-    prepared = pipeline_module._load_prepared_organs(config)
-
-    by_label = {item.label: item for item in prepared}
-    assert len(prepared) == 14
-    assert by_label["portal_vein"].identifier == "portal_vein_and_splenic_vein"
-    assert loaded_paths.count((organ_models["portal_vein_and_splenic_vein"], "LPS")) == 1
-
-
-def test_prepared_organ_and_vessel_layers_share_mesh_for_the_same_source(monkeypatch, tmp_path):
-    shared_path = tmp_path / "portal_vein_and_splenic_vein.ply"
-    organ_models = {
-        identifier: tmp_path / f"{identifier}.ply"
-        for identifier in pipeline_module.ORGAN_BOUNDARY_MODEL_IDS.values()
-    }
-    organ_models["portal_vein_and_splenic_vein"] = shared_path
-    loaded_paths = []
-
-    def load(path, *, input_coordinate_system):
-        loaded_paths.append((path, input_coordinate_system))
-        return SimpleNamespace(mesh=trimesh.creation.box())
-
-    monkeypatch.setattr(pipeline_module, "load_surface_mesh", load)
-    config = SimpleNamespace(
-        organ_models=organ_models,
-        vessel_models=(
-            VesselModel("portal_tree", shared_path, "portal", (255, 0, 255)),
-        ),
-        geometry=SimpleNamespace(input_coordinate_system="LPS"),
-    )
-    mesh_cache = {}
-
-    organs = pipeline_module._load_prepared_organs(config, mesh_cache)
-    vessels = pipeline_module._load_prepared_vessels(config, mesh_cache)
-
-    portal_organ = next(item for item in organs if item.label == "portal_vein")
-    assert loaded_paths.count((shared_path, "LPS")) == 1
-    assert portal_organ.mesh is vessels[0].mesh
-    assert portal_organ.label == "portal_vein"
-    assert vessels[0].label == "portal"
-
-
-def test_single_square_resamples_ct_and_vessel_model_into_gallery(tmp_path):
-    image = sitk.GetImageFromArray(np.full((16, 16, 16), 40.0, dtype=np.float32))
-    volume = CTVolume.from_sitk(image)
-    vessel_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
-    vessel_mesh.apply_translation((7.0, 7.0, 5.0))
-    organ_mesh = trimesh.creation.box(extents=(4.0, 4.0, 4.0))
-    organ_mesh.apply_translation((7.0, 7.0, 5.0))
-    sample = SquareSample(
-        sample_id="stomach-000000-x-00",
-        organ="stomach",
-        probe_point_world=np.asarray([7.0, 7.0, 5.0]),
-        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
-        vertices=np.asarray([[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]),
-        source_region="stomach",
-        yaw_policy="standard",
-        roll_degrees=-5.0,
-        pitch_degrees=0.0,
-        yaw_degrees=30.0,
-        local_x_world=np.asarray([0.0, 1.0, 0.0]),
-        local_y_world=np.asarray([1.0, 0.0, 0.0]),
-        local_z_world=np.asarray([0.0, 0.0, -1.0]),
-        target_ids=("liver",),
-    )
-    writer = GalleryWriter(tmp_path / "case", "case")
-
-    status = render_square_sample(
-        sample,
-        volume,
-        [PreparedVessel("portal_tree", "portal", (255, 0, 255), vessel_mesh)],
-        CTConfig(output_resolution=20),
-        FilterConfig(),
-        writer,
-        organs=[pipeline_module.PreparedOrgan("liver", "liver", (140, 86, 75), organ_mesh, organ_mesh.bounds)],
-    )
-
-    assert status == "gallery"
-    assert (tmp_path / "case" / "gallery" / "ct_overlay" / "stomach-000000-x-00.png").is_file()
-    assert (tmp_path / "case" / "gallery" / "organ_vessel_boundary" / "stomach-000000-x-00.png").is_file()
-    record = json.loads((tmp_path / "case" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8"))
-    assert record["organ_labels"] == ["liver"]
-    assert record["coordinate_system"] == "RAS"
-    assert record["core_design_sha256"] == "de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca"
-    assert len(record["build_git_commit"]) == 40
-    assert record["source_region"] == "stomach"
-    assert record["angles_degrees"] == {"roll": -5.0, "pitch": 0.0, "yaw": 30.0}
-    assert record["target_ids"] == ["liver"]
-
-
-def test_precomputed_square_writes_the_same_gallery_artifacts(tmp_path):
-    vessel_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
-    vessel_mesh.apply_translation((7.0, 7.0, 5.0))
-    sample = SquareSample(
-        sample_id="stomach-000000-x-00",
-        organ="stomach",
-        probe_point_world=np.asarray([7.0, 7.0, 5.0]),
-        input_normal_world=np.asarray([0.0, 0.0, 1.0]),
-        vertices=np.asarray([[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]),
-    )
-    writer = GalleryWriter(tmp_path / "case", "case")
-
-    status = render_precomputed_square(
-        sample,
-        np.full((20, 20), 40.0, dtype=np.float32),
-        [PreparedVessel("portal_tree", "portal", (255, 0, 255), vessel_mesh)],
-        CTConfig(output_resolution=20),
-        FilterConfig(),
-        writer,
-        resampling_backend="cpu",
-    )
-
-    assert status == "gallery"
-    record = json.loads((tmp_path / "case" / "gallery" / "gallery.jsonl").read_text(encoding="utf-8"))
-    assert record["resampling_backend"] == "cpu"
-
-
 def test_manual_precomputed_square_adds_eus_outputs_without_changing_original_vessels(tmp_path):
     vessel_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
     vessel_mesh.apply_translation((7.0, 7.0, 5.0))
@@ -255,27 +77,16 @@ def test_manual_precomputed_square_adds_eus_outputs_without_changing_original_ve
             [[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]
         ),
     )
-    vessels = [PreparedVessel("portal_tree", "portal", (255, 0, 255), vessel_mesh)]
+    vessels = [PreparedVessel("artery_tree", "artery", (255, 82, 0), vessel_mesh)]
     hu = np.full((20, 20), 40.0, dtype=np.float32)
     labels = np.zeros((20, 20), dtype=np.uint8)
     labels[7:12, 7:12] = 8
     labels[0:4, 15:19] = 9
-    legacy_writer = GalleryWriter(tmp_path / "legacy", "case")
     manual_writer = GalleryWriter(
         tmp_path / "manual",
         "case",
-        manual_segmentation_enabled=True,
     )
 
-    legacy_status = render_precomputed_square(
-        sample,
-        hu,
-        vessels,
-        CTConfig(output_resolution=20),
-        FilterConfig(),
-        legacy_writer,
-        resampling_backend="cpu",
-    )
     manual_status = render_precomputed_square(
         sample,
         hu,
@@ -288,16 +99,11 @@ def test_manual_precomputed_square_adds_eus_outputs_without_changing_original_ve
         manual_segmentation=_manual_segmentation_config(Path("unused.seg.nrrd")),
     )
 
-    legacy_record = json.loads((tmp_path / "legacy/gallery/gallery.jsonl").read_text(encoding="utf-8"))
     manual_record = json.loads((tmp_path / "manual/gallery/gallery.jsonl").read_text(encoding="utf-8"))
-    assert legacy_status == manual_status == "gallery"
-    assert manual_record["features"] == legacy_record["features"]
-    for directory in ("boundary_only", "ct_overlay"):
-        assert (
-            tmp_path / "manual/gallery" / directory / f"{sample.sample_id}.png"
-        ).read_bytes() == (
-            tmp_path / "legacy/gallery" / directory / f"{sample.sample_id}.png"
-        ).read_bytes()
+    assert manual_status == "gallery"
+    assert [item["label"] for item in manual_record["features"]] == ["artery"]
+    assert (tmp_path / "manual/gallery/boundary_only" / f"{sample.sample_id}.png").is_file()
+    assert (tmp_path / "manual/gallery/ct_overlay" / f"{sample.sample_id}.png").is_file()
     assert manual_record["eus_vessel_labels"] == ["aorta", "inferior_vena_cava"]
     assert [item["label"] for item in manual_record["eus_vessel_features"]] == ["aorta"]
     with Image.open(tmp_path / "manual/gallery" / manual_record["eus_vessel_boundary_png"]) as image:
@@ -330,11 +136,10 @@ def test_manual_label_analysis_is_skipped_outside_original_gallery(
     if vessels:
         mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
         mesh.apply_translation((7.0, 7.0, 5.0))
-        prepared = [PreparedVessel("portal_tree", "portal", (255, 0, 255), mesh)]
+        prepared = [PreparedVessel("artery_tree", "artery", (255, 0, 255), mesh)]
     writer = GalleryWriter(
         tmp_path / "case",
         "case",
-        manual_segmentation_enabled=True,
     )
 
     def unexpected_analysis(*_args, **_kwargs):
@@ -365,7 +170,6 @@ def test_rejected_precomputed_square_skips_vessel_intersection(monkeypatch, tmp_
         vertices=np.asarray([[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]),
     )
     vessel_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
-    organ_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
     writer = GalleryWriter(tmp_path / "case", "case")
 
     def unexpected_intersection(*_):
@@ -376,18 +180,19 @@ def test_rejected_precomputed_square_skips_vessel_intersection(monkeypatch, tmp_
     status = render_precomputed_square(
         sample,
         np.full((20, 20), -1000.0, dtype=np.float32),
-        [PreparedVessel("portal_tree", "portal", (255, 0, 255), vessel_mesh)],
+        [PreparedVessel("artery_tree", "artery", (255, 82, 0), vessel_mesh)],
         CTConfig(output_resolution=20),
         FilterConfig(),
         writer,
-        organs=[pipeline_module.PreparedOrgan("liver", "liver", (140, 86, 75), organ_mesh, organ_mesh.bounds)],
         resampling_backend="cpu",
+        label_plane=np.zeros((20, 20), dtype=np.uint8),
+        manual_segmentation=_manual_segmentation_config(Path("unused.seg.nrrd")),
     )
 
     assert status == "rejected"
 
 
-def test_unindexed_precomputed_square_skips_organ_intersection(monkeypatch, tmp_path):
+def test_unindexed_precomputed_square_skips_manual_label_analysis(monkeypatch, tmp_path):
     sample = SquareSample(
         sample_id="stomach-000000-x-00",
         organ="stomach",
@@ -395,13 +200,12 @@ def test_unindexed_precomputed_square_skips_organ_intersection(monkeypatch, tmp_
         input_normal_world=np.asarray([0.0, 0.0, 1.0]),
         vertices=np.asarray([[2.0, 2.0, 5.0], [12.0, 2.0, 5.0], [12.0, 12.0, 5.0], [2.0, 12.0, 5.0]]),
     )
-    organ_mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
     writer = GalleryWriter(tmp_path / "case", "case")
 
     def unexpected_intersection(*_):
-        raise AssertionError("unindexed samples must skip organ mesh intersections")
+        raise AssertionError("unindexed samples must skip manual label analysis")
 
-    monkeypatch.setattr("ct_vascular_resampling.pipeline.intersect_mesh_with_square", unexpected_intersection)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.analyze_manual_label_plane", unexpected_intersection)
 
     status = render_precomputed_square(
         sample,
@@ -410,8 +214,9 @@ def test_unindexed_precomputed_square_skips_organ_intersection(monkeypatch, tmp_
         CTConfig(output_resolution=20),
         FilterConfig(),
         writer,
-        organs=[pipeline_module.PreparedOrgan("liver", "liver", (140, 86, 75), organ_mesh, organ_mesh.bounds)],
         resampling_backend="cpu",
+        label_plane=np.zeros((20, 20), dtype=np.uint8),
+        manual_segmentation=_manual_segmentation_config(Path("unused.seg.nrrd")),
     )
 
     assert status == "unindexed"
@@ -437,13 +242,17 @@ def test_out_of_fov_square_writes_black_filled_ct_only(monkeypatch, tmp_path):
     monkeypatch.setattr("ct_vascular_resampling.pipeline.evaluate_ct_quality", unexpected_processing)
     monkeypatch.setattr("ct_vascular_resampling.pipeline.intersect_mesh_with_square", unexpected_processing)
 
-    status = render_square_sample(
+    status = render_precomputed_square(
         sample,
-        volume,
+        np.full((20, 20), 40.0, dtype=np.float32),
         [],
         CTConfig(output_resolution=20, fill_hu_value=40.0),
         FilterConfig(),
         writer,
+        resampling_backend="cpu",
+        volume=volume,
+        label_plane=np.zeros((20, 20), dtype=np.uint8),
+        manual_segmentation=_manual_segmentation_config(Path("unused.seg.nrrd")),
     )
 
     record = json.loads((tmp_path / "case" / "excluded_fov.jsonl").read_text(encoding="utf-8"))
@@ -469,6 +278,11 @@ def _single_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
     mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
     mesh_path = tmp_path / "model.obj"
     mesh.export(mesh_path)
+    label_path = tmp_path / "labels.nrrd"
+    sitk.WriteImage(
+        sitk.GetImageFromArray(np.zeros((16, 16, 16), dtype=np.uint8)),
+        str(label_path),
+    )
     organ_models = {
         name: mesh_path
         for name in (
@@ -497,7 +311,6 @@ def _single_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
             VesselModel("artery_tree", mesh_path, "artery", (255, 82, 0)),
             VesselModel("vein_tree", mesh_path, "vein", (0, 188, 212)),
         ),
-        registration_module_path=tmp_path / "2021.py",
         sampling=SamplingConfig(
             point_counts={"stomach": 1, "liver": 1, "pancreas": 1, "duodenum_part1": 1, "duodenum_part2": 1, "esophagus": 1}
         ),
@@ -505,6 +318,7 @@ def _single_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
         ct=CTConfig(output_resolution=20),
         filtering=FilterConfig(),
         runtime=RuntimeConfig(seed=0, workers=1, backend="cpu"),
+        manual_segmentation=_manual_segmentation_config(label_path),
         geometry=GeometryConfig(input_coordinate_system="RAS"),
     )
     outside_sample = SquareSample(
@@ -523,13 +337,7 @@ def _single_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
 
 
 def _manual_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
-    config, sample = _single_fov_case(tmp_path)
-    label_path = tmp_path / "labels.nrrd"
-    sitk.WriteImage(
-        sitk.GetImageFromArray(np.zeros((16, 16, 16), dtype=np.uint8)),
-        str(label_path),
-    )
-    return replace(config, manual_segmentation=_manual_segmentation_config(label_path)), sample
+    return _single_fov_case(tmp_path)
 
 
 def test_manual_protocol_records_segmentation_geometry_mappings_and_sources(tmp_path):
@@ -644,13 +452,14 @@ def test_manual_library_summary_counts_visible_labels_and_complete_features(
     ):
         (gallery / directory).mkdir(parents=True, exist_ok=True)
     records = []
-    for sample_id, labels, features in (
+    for sample_id, labels, eus_features, original_label in (
         (
             "first",
             ["aorta", "inferior_vena_cava"],
             [{"label": "aorta", "x_mm": 1.0, "y_mm": 2.0, "area_mm2": 3.0}],
+            "artery",
         ),
-        ("second", ["aorta"], []),
+        ("second", ["aorta"], [], "vein"),
     ):
         for directory in (
             "organ_vessel_boundary",
@@ -662,13 +471,16 @@ def test_manual_library_summary_counts_visible_labels_and_complete_features(
             {
                 "slice_id": sample_id,
                 "status": "gallery",
+                "features": [
+                    {"label": original_label, "x_mm": 1.0, "y_mm": 2.0, "area_mm2": 3.0}
+                ],
                 "organ_metadata_schema_version": "eus-organ-metadata/v1",
                 "organ_vessel_boundary_png": f"organ_vessel_boundary/{sample_id}.png",
                 "organ_labels": [],
                 "eus_candidate_organ_labels": [],
                 "eus_vessel_metadata_schema_version": "eus-vessel-metadata/v1",
                 "eus_vessel_labels": labels,
-                "eus_vessel_features": features,
+                "eus_vessel_features": eus_features,
                 "eus_vessel_boundary_png": f"eus_vessel_boundary/{sample_id}.png",
                 "ct_eus_vessel_overlay_png": f"ct_eus_vessel_overlay/{sample_id}.png",
             }
@@ -679,13 +491,6 @@ def test_manual_library_summary_counts_visible_labels_and_complete_features(
     )
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
     monkeypatch.setattr("ct_vascular_resampling.pipeline.generate_square_samples", lambda *_: [])
-    import ct_vascular_resampling.registration_adapter as registration_adapter
-
-    monkeypatch.setattr(
-        registration_adapter,
-        "load_gallery_database",
-        lambda *_args, **_kwargs: SimpleNamespace(features=[]),
-    )
     run_case(config, steps=["index"])
 
     summary = json.loads((case_directory / "library_summary.json").read_text(encoding="utf-8"))
@@ -694,6 +499,8 @@ def test_manual_library_summary_counts_visible_labels_and_complete_features(
         "inferior_vena_cava": 1,
     }
     assert summary["eus_vessel_feature_counts"] == {"aorta": 1}
+    assert summary["indexed_feature_count"] == 2
+    assert summary["feature_label_counts"] == {"artery": 1, "vein": 1}
     assert summary["eus_vessel_colors"] == {
         "aorta": [255, 0, 0],
         "inferior_vena_cava": [0, 0, 255],
@@ -1014,32 +821,6 @@ def test_recover_interrupted_run_metadata_rebuilds_audited_protocol(monkeypatch,
     assert ct_path.read_bytes() == ct_before
 
 
-def test_manual_recovery_refuses_to_invent_missing_original_protocol(monkeypatch, tmp_path):
-    config, outside_sample = _manual_fov_case(tmp_path)
-    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
-    monkeypatch.setattr(
-        "ct_vascular_resampling.pipeline.generate_square_samples",
-        lambda *_: [outside_sample],
-    )
-    run_case(config, steps=["render"], workers=1)
-    case_directory = config.output_root / config.case_id
-    metadata_path = case_directory / "run_metadata.json"
-    metadata_path.unlink()
-    manifest_before = (case_directory / "manifest.jsonl").read_bytes()
-
-    with pytest.raises(ValueError, match="手工分割|原始.*协议|无法.*重建|新输出"):
-        pipeline_module.recover_interrupted_run_metadata(
-            config,
-            expected_completed_count=1,
-            reason="sighup",
-            exit_code=129,
-            recovered_at_utc="2026-08-11T12:00:00Z",
-        )
-
-    assert not metadata_path.exists()
-    assert (case_directory / "manifest.jsonl").read_bytes() == manifest_before
-
-
 def test_recover_interrupted_run_metadata_refuses_existing_metadata(monkeypatch, tmp_path):
     config, outside_sample = _single_fov_case(tmp_path)
     monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
@@ -1201,27 +982,17 @@ def test_changed_protocol_is_rejected_before_state_manifest_repair(monkeypatch, 
     assert (case_directory / "manifest.jsonl").read_bytes() == root_before
 
 
-def test_run_case_writes_legacy_intermediates_and_gallery(monkeypatch, tmp_path):
+def test_run_case_writes_manual_full_resampling_artifacts_and_gallery(monkeypatch, tmp_path):
     ct_path = tmp_path / "ct.nrrd"
     sitk.WriteImage(sitk.GetImageFromArray(np.full((32, 32, 32), 40.0, dtype=np.float32)), str(ct_path))
     mesh = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
     mesh.apply_translation((8.0, 8.0, 13.0))
     mesh_path = tmp_path / "model.obj"
     mesh.export(mesh_path)
-    (tmp_path / "2021.py").write_text(
-        """
-class VesselTriplet:
-    def __init__(self, x, y, area, label=''): self.x, self.y, self.area, self.label = x, y, area, label
-class FeatureVector:
-    def __init__(self, triplets=None, pose=None): self.triplets, self.pose = triplets or [], pose
-class ProbePose:
-    def __init__(self, surface_point, rx, ry, rz, depth): self.surface_point = surface_point
-class MultiLabelledCBIR:
-    def __init__(self, database, search_range=2): self.database = database
-class HMMPoseEstimator:
-    def __init__(self, **kwargs): pass
-""".strip(),
-        encoding="utf-8",
+    label_path = tmp_path / "labels.nrrd"
+    sitk.WriteImage(
+        sitk.GetImageFromArray(np.zeros((32, 32, 32), dtype=np.uint8)),
+        str(label_path),
     )
     organ_models = {name: mesh_path for name in (
         "adrenal_gland_left", "adrenal_gland_right", "aorta", "duodenum", "esophagus", "gallbladder",
@@ -1233,10 +1004,9 @@ class HMMPoseEstimator:
         output_root=tmp_path / "output",
         organ_models=organ_models,
         vessel_models=(
-            VesselModel("portal", mesh_path, "portal", (255, 0, 255)),
-            VesselModel("hepatic", mesh_path, "hepatic", (0, 188, 212)),
+            VesselModel("artery_tree", mesh_path, "artery", (255, 82, 0)),
+            VesselModel("vein_tree", mesh_path, "vein", (0, 188, 212)),
         ),
-        registration_module_path=tmp_path / "2021.py",
         sampling=SamplingConfig(
             point_counts={
                 "stomach": 1,
@@ -1256,6 +1026,7 @@ class HMMPoseEstimator:
         ct=CTConfig(output_resolution=20),
         filtering=FilterConfig(),
         runtime=RuntimeConfig(seed=0, workers=2, backend="cpu"),
+        manual_segmentation=_manual_segmentation_config(label_path),
         geometry=GeometryConfig(input_coordinate_system="RAS"),
     )
     manual_selection = CenterlineSelectionAudit(
@@ -1368,7 +1139,7 @@ class HMMPoseEstimator:
     }
     assert metadata["quality_filtering"] == {
         "black_threshold": 50,
-        "black_ratio_limit": 0.5,
+        "black_ratio_limit": 0.6,
         "line_min_diagonal_fraction": 0.7,
         "black_side_min_ratio": 0.9,
         "valid_side_max_black_ratio": 0.1,
@@ -1405,8 +1176,8 @@ class HMMPoseEstimator:
     assert library_summary["case_id"] == "case_001"
     assert library_summary["indexed_feature_count"] == completed.indexed_feature_count
     assert library_summary["gallery_manifest"] == "gallery/gallery.jsonl"
-    assert set(library_summary["organ_boundary_colors"]) == set(pipeline_module.ORGAN_BOUNDARY_IDS)
-    assert set(library_summary["organ_label_counts"]).issubset(set(pipeline_module.ORGAN_BOUNDARY_IDS))
+    assert set(library_summary["organ_boundary_colors"]) == set(ORGAN_BOUNDARY_IDS)
+    assert set(library_summary["organ_label_counts"]).issubset(set(ORGAN_BOUNDARY_IDS))
     gallery_records = [
         json.loads(line)
         for line in (tmp_path / "output" / "case_001" / "gallery" / "gallery.jsonl")
@@ -1419,7 +1190,6 @@ class HMMPoseEstimator:
         for record in gallery_records
         for label in set(record["eus_candidate_organ_labels"])
     )
-    assert any(count > 1 for count in expected_eus_counts.values())
     assert library_summary["eus_candidate_organ_label_counts"] == dict(
         sorted(expected_eus_counts.items())
     )

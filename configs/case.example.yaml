@@ -1,69 +1,66 @@
-case_id: "case_001"
-ct_path: "../data/case_001/ct.nrrd"
-# ct_path 为包含多序列 DICOM 的目录时必须填写实际目标 Series UID。
-# dicom_series_uid: "1.2.840.x.x"
-output_root: "../output"
-registration_module_path: "/mnt/c/Users/zhangyutang/Desktop/CT-EUS定位项目/2021.py"
+case_id: case_001
+ct_path: ../data/case_001/ct.nrrd
+# CT 为多序列 DICOM 目录时必须指定目标序列，避免误用 scout 或不同层厚重建。
+# dicom_series_uid: 1.2.840.example
+output_root: ../output
 
-# 14 类通用器官结构的模型来源。腹主动脉、下腔静脉、门静脉同时保留血管身份；
-# 门静脉器官轮廓复用 portal_vein_and_splenic_vein 组合模型。胆囊保留，胆管不配置。
+# 这些网格由 scripts/preprocess_manual_segmentation_case.py 从手工 .seg.nrrd 生成。
 organ_models:
-  adrenal_gland_left: "../data/case_001/models/adrenal_gland_left.obj"
-  adrenal_gland_right: "../data/case_001/models/adrenal_gland_right.obj"
-  aorta: "../data/case_001/models/aorta.obj"
-  duodenum: "../data/case_001/models/duodenum.obj"
-  esophagus: "../data/case_001/models/esophagus.obj"
-  gallbladder: "../data/case_001/models/gallbladder.obj"
-  inferior_vena_cava: "../data/case_001/models/inferior_vena_cava.obj"
-  kidney_left: "../data/case_001/models/kidney_left.obj"
-  kidney_right: "../data/case_001/models/kidney_right.obj"
-  liver: "../data/case_001/models/liver.obj"
-  pancreas: "../data/case_001/models/pancreas.obj"
-  portal_vein_and_splenic_vein: "../data/case_001/models/portal_vein_and_splenic_vein.obj"
-  spleen: "../data/case_001/models/spleen.obj"
-  stomach: "../data/case_001/models/stomach.obj"
+  adrenal_gland_left: ../data/case_001/prepared/models/adrenal_gland_left.ply
+  adrenal_gland_right: ../data/case_001/prepared/models/adrenal_gland_right.ply
+  aorta: ../data/case_001/prepared/models/aorta.ply
+  duodenum: ../data/case_001/prepared/models/duodenum.ply
+  esophagus: ../data/case_001/prepared/models/esophagus.ply
+  gallbladder: ../data/case_001/prepared/models/gallbladder.ply
+  inferior_vena_cava: ../data/case_001/prepared/models/inferior_vena_cava.ply
+  kidney_left: ../data/case_001/prepared/models/kidney_left.ply
+  kidney_right: ../data/case_001/prepared/models/kidney_right.ply
+  liver: ../data/case_001/prepared/models/liver.ply
+  pancreas: ../data/case_001/prepared/models/pancreas.ply
+  portal_vein_and_splenic_vein: ../data/case_001/prepared/models/portal_vein_and_splenic_vein.ply
+  spleen: ../data/case_001/prepared/models/spleen.ply
+  stomach: ../data/case_001/prepared/models/stomach.ply
 
-# 双身份结构仍按原血管配置参与血管求交和特征提取，此处行为不受器官元数据影响。
+# 原重建血管继续独立决定 features、Gallery 状态和原血管边界图。
 vessel_models:
-  - id: "portal_tree"
-    path: "../data/case_001/models/portal_vein_and_splenic_vein.obj"
-    label: "portal"
-    color: [255, 0, 255]
-  - id: "hepatic_tree"
-    path: "../data/case_001/models/hepatic_vein.obj"
-    label: "hepatic"
+  - id: artery_tree
+    path: ../data/case_001/artery_tree.ply
+    label: artery
+    color: [255, 82, 0]
+  - id: vein_tree
+    path: ../data/case_001/vein_tree.ply
+    label: vein
     color: [0, 188, 212]
 
-# 可选：启用手工 3D Slicer 标签图模式。取消以下整段注释时，organ_models 仍用于
-# 采样点/零度面几何，原 vessel_models 仍独立产生原 features、boundary_only 和
-# ct_overlay；标签图只附加像素语义器官信息与三类 EUS 血管结果。
-# manual_segmentation:
-#   path: "../data/case_001/EUS-main-organ.seg.nrrd"
-#   organ_label_values:
-#     adrenal_gland_left: [13]
-#     adrenal_gland_right: [12]
-#     aorta: [8]
-#     duodenum: [14]
-#     esophagus: [5]
-#     gallbladder: [4]
-#     inferior_vena_cava: [9]
-#     kidney_left: [3]
-#     kidney_right: [2]
-#     liver: [6]
-#     pancreas: [11]
-#     portal_vein: [23, 26, 33, 34, 35, 36, 37]
-#     spleen: [1]
-#     stomach: [7]
-#   eus_vessel_label_values:
-#     aorta: [8]
-#     inferior_vena_cava: [9]
-#     portal_vein: [26, 33, 34, 35, 36, 37]
-#   eus_vessel_colors:
-#     aorta: [255, 0, 0]
-#     inferior_vena_cava: [0, 0, 255]
-#     portal_vein: [170, 85, 255]
-# Main Portal Vein 23 只属于器官门静脉联合，不属于 EUS 血管门静脉；
-# SMV 26 同时属于器官门静脉联合和 EUS 血管门静脉。
+manual_segmentation:
+  path: ../data/case_001/prepared/segmentation/EUS-main-organ.seg.nrrd
+  organ_label_values:
+    adrenal_gland_left: [13]
+    adrenal_gland_right: [12]
+    aorta: [8]
+    duodenum: [14]
+    esophagus: [5]
+    gallbladder: [4]
+    inferior_vena_cava: [9]
+    kidney_left: [3]
+    kidney_right: [2]
+    liver: [6]
+    pancreas: [11]
+    portal_vein: [23, 26, 33, 34, 35, 36, 37]
+    spleen: [1]
+    stomach: [7]
+  eus_vessel_label_values:
+    aorta: [8]
+    inferior_vena_cava: [9]
+    portal_vein: [26, 33, 34, 35, 36, 37]
+  eus_vessel_colors:
+    aorta: [255, 0, 0]
+    inferior_vena_cava: [0, 0, 255]
+    portal_vein: [170, 85, 255]
+
+geometry:
+  input_coordinate_system: LPS
+  canonical_coordinate_system: RAS
 
 sampling:
   point_counts:
@@ -79,17 +76,14 @@ sampling:
   centerline_voxel_pitch_mm: 1.0
   centerline_tangent_window_mm: 10.0
   centerline_max_terminal_spur_mm: 5.0
-  # 仅在病例骨架经人工解剖确认后启用；坐标固定为 RAS mm，不能复制到其他病例。
+  # 病例骨架必须经解剖确认后才可填写以下 RAS mm 端点，不可跨病例复制。
   # duodenum_centerline_endpoint_hints_ras_mm:
-  #   proximal: [19.0, 24.0, 700.0]
-  #   distal: [-33.0, 1.0, 664.0]
+  #   proximal: [0.0, 0.0, 0.0]
+  #   distal: [0.0, 0.0, 0.0]
   # duodenum_centerline_endpoint_match_tolerance_mm: 1.0
 
 square:
   side_length_mm: 100.0
-  # 三轴角度是项目级固定算法，不是病例参数：
-  # roll -45..+45 / 5 deg；pitch -30..+30 / 5 deg；普通 yaw -30..+30 / 5 deg；
-  # 十二指肠球部和胰腺特殊区 yaw 均为 -120..+30 / 5 deg。
 
 ct:
   output_resolution: 300
@@ -99,13 +93,14 @@ ct:
 
 filtering:
   black_threshold: 50
-  # 旧网格模式默认 0.50；本次正式手工标签模式必须改为 0.60。
-  # 两者均为严格大于阈值才按黑色比例拒绝。
-  black_ratio_limit: 0.50
+  black_ratio_limit: 0.60
   line_min_diagonal_fraction: 0.70
   black_side_min_ratio: 0.90
   valid_side_max_black_ratio: 0.10
 
 runtime:
   seed: 0
-  workers: 8
+  workers: 4
+  backend: auto
+  gpu_device: 0
+  gpu_batch_size: 8

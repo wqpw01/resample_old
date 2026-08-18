@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from .contract import BLACK_RATIO_LIMIT
+
 
 REQUIRED_ORGAN_IDS = (
     "adrenal_gland_left",
@@ -34,10 +36,8 @@ DEFAULT_POINT_COUNTS = {
     "duodenum_part2": 500,
     "esophagus": 200,
 }
-VALID_VESSEL_LABEL_PAIRS = (frozenset({"portal", "hepatic"}), frozenset({"artery", "vein"}))
+VALID_VESSEL_LABEL_PAIR = frozenset({"artery", "vein"})
 DEFAULT_VESSEL_COLORS = {
-    "portal": (255, 0, 255),
-    "hepatic": (0, 188, 212),
     "artery": (255, 82, 0),
     "vein": (0, 188, 212),
 }
@@ -116,7 +116,7 @@ class CTConfig:
 @dataclass(frozen=True)
 class FilterConfig:
     black_threshold: int = 50
-    black_ratio_limit: float = 0.50
+    black_ratio_limit: float = BLACK_RATIO_LIMIT
     line_min_diagonal_fraction: float = 0.70
     black_side_min_ratio: float = 0.90
     valid_side_max_black_ratio: float = 0.10
@@ -152,15 +152,14 @@ class CaseConfig:
     output_root: Path
     organ_models: dict[str, Path]
     vessel_models: tuple[VesselModel, ...]
-    registration_module_path: Path
     sampling: SamplingConfig
     square: SquareConfig
     ct: CTConfig
     filtering: FilterConfig
     runtime: RuntimeConfig
+    manual_segmentation: ManualSegmentationConfig
     geometry: GeometryConfig = field(default_factory=GeometryConfig)
     dicom_series_uid: str | None = None
-    manual_segmentation: ManualSegmentationConfig | None = None
 
 
 def _as_path(value: Any, config_directory: Path, field: str) -> Path:
@@ -231,8 +230,8 @@ def _load_vessels(raw: Any, config_directory: Path) -> tuple[VesselModel, ...]:
             raise ValueError("每个 vessel_models 项必须提供 id")
         if identifier in ids:
             raise ValueError(f"血管模型 id 重复: {identifier}")
-        if label not in DEFAULT_VESSEL_COLORS:
-            raise ValueError(f"血管模型 {identifier} 的 label 必须是 portal、hepatic、artery 或 vein")
+        if label not in {"artery", "vein"}:
+            raise ValueError(f"血管模型 {identifier} 的 label 必须是 artery 或 vein")
         if label in labels:
             raise ValueError(f"血管标签重复: {label}")
         ids.add(identifier)
@@ -245,8 +244,8 @@ def _load_vessels(raw: Any, config_directory: Path) -> tuple[VesselModel, ...]:
                 color=_color(values.get("color"), label),
             )
         )
-    if frozenset(labels) not in VALID_VESSEL_LABEL_PAIRS:
-        raise ValueError("vessel_models 必须同时提供 portal/hepatic 或 artery/vein 网格")
+    if frozenset(labels) != VALID_VESSEL_LABEL_PAIR:
+        raise ValueError("vessel_models 必须同时提供 artery 和 vein 网格")
     return tuple(vessels)
 
 
@@ -370,7 +369,11 @@ def _load_filter(raw: Any) -> FilterConfig:
         raise ValueError("filtering.black_threshold 必须在 0-255 内")
     return FilterConfig(
         black_threshold=black_threshold,
-        black_ratio_limit=_ratio(values.get("black_ratio_limit"), "filtering.black_ratio_limit", 0.50),
+        black_ratio_limit=_ratio(
+            values.get("black_ratio_limit"),
+            "filtering.black_ratio_limit",
+            BLACK_RATIO_LIMIT,
+        ),
         line_min_diagonal_fraction=_ratio(
             values.get("line_min_diagonal_fraction"), "filtering.line_min_diagonal_fraction", 0.70, allow_zero=False
         ),
@@ -482,6 +485,8 @@ def load_case_config(path: str | Path) -> CaseConfig:
     with config_path.open("r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     values = _mapping(raw, "病例配置")
+    if "registration_module_path" in values:
+        raise ValueError("registration_module_path 已移除；论文版内部生成 library_summary.json")
     config_directory = config_path.parent
     case_id = values.get("case_id")
     if not isinstance(case_id, str) or not case_id:
@@ -496,13 +501,18 @@ def load_case_config(path: str | Path) -> CaseConfig:
     dicom_series_uid = values.get("dicom_series_uid")
     if dicom_series_uid is not None and (not isinstance(dicom_series_uid, str) or not dicom_series_uid):
         raise ValueError("dicom_series_uid 必须是非空字符串")
+    manual_segmentation = _load_manual_segmentation(
+        values.get("manual_segmentation"),
+        config_directory,
+    )
+    if manual_segmentation is None:
+        raise ValueError("论文版病例配置必须包含 manual_segmentation 手工分割输入")
     return CaseConfig(
         case_id=case_id,
         ct_path=_as_path(values.get("ct_path"), config_directory, "ct_path"),
         output_root=_as_path(values.get("output_root"), config_directory, "output_root"),
         organ_models=organ_models,
         vessel_models=_load_vessels(values.get("vessel_models"), config_directory),
-        registration_module_path=_as_path(values.get("registration_module_path"), config_directory, "registration_module_path"),
         sampling=_load_sampling(values.get("sampling")),
         square=_load_square(values.get("square")),
         ct=_load_ct(values.get("ct")),
@@ -510,8 +520,5 @@ def load_case_config(path: str | Path) -> CaseConfig:
         runtime=_load_runtime(values.get("runtime")),
         geometry=_load_geometry(values.get("geometry")),
         dicom_series_uid=dicom_series_uid,
-        manual_segmentation=_load_manual_segmentation(
-            values.get("manual_segmentation"),
-            config_directory,
-        ),
+        manual_segmentation=manual_segmentation,
     )

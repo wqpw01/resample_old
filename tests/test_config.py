@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 import copy
-import importlib
-
 import pytest
 import yaml
 
 from ct_vascular_resampling.config import ORGAN_BOUNDARY_MODEL_IDS, REQUIRED_ORGAN_IDS, load_case_config
 
 
-DEFAULT_VESSEL_MODELS = """  - id: portal_tree
-    path: portal.stl
-    label: portal
-    color: [255, 0, 255]
-  - id: hepatic_tree
-    path: hepatic.ply
-    label: hepatic
+DEFAULT_VESSEL_MODELS = """  - id: artery_tree
+    path: artery.stl
+    label: artery
+    color: [255, 82, 0]
+  - id: vein_tree
+    path: vein.ply
+    label: vein
     color: [0, 188, 212]"""
 
 
@@ -28,16 +26,24 @@ def test_organ_boundary_models_include_dual_role_vessels():
     assert "common_bile_duct" not in ORGAN_BOUNDARY_MODEL_IDS
 
 
-def _case_yaml(organ_models: str, vessel_models: str = DEFAULT_VESSEL_MODELS) -> str:
-    return f"""case_id: demo
+def _case_yaml(
+    organ_models: str,
+    vessel_models: str = DEFAULT_VESSEL_MODELS,
+    manual_segmentation: dict | None = None,
+) -> str:
+    base = f"""case_id: demo
 ct_path: ct.nrrd
 output_root: output
 organ_models:
 {organ_models}
 vessel_models:
 {vessel_models}
-registration_module_path: registration_2021.py
 """
+    return base + yaml.safe_dump(
+        {"manual_segmentation": manual_segmentation or _valid_manual_segmentation()},
+        allow_unicode=True,
+        sort_keys=False,
+    )
 
 
 def _valid_manual_segmentation() -> dict:
@@ -75,15 +81,7 @@ def _valid_manual_segmentation() -> dict:
 def _write_manual_case(tmp_path, manual_segmentation: dict):
     organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
     config_path = tmp_path / "case.yaml"
-    config_path.write_text(
-        _case_yaml(organ_models)
-        + yaml.safe_dump(
-            {"manual_segmentation": manual_segmentation},
-            allow_unicode=True,
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
+    config_path.write_text(_case_yaml(organ_models, manual_segmentation=manual_segmentation), encoding="utf-8")
     return config_path
 
 
@@ -107,9 +105,9 @@ def test_case_config_resolves_relative_paths_and_uses_confirmed_defaults(tmp_pat
     assert config.sampling.minimum_spacing_mm == 10.0
     assert config.sampling.centerline_max_terminal_spur_mm == 5.0
     assert config.runtime.seed == 0
-    assert config.filtering.black_ratio_limit == 0.50
-    assert [model.label for model in config.vessel_models] == ["portal", "hepatic"]
-    assert config.manual_segmentation is None
+    assert config.filtering.black_ratio_limit == 0.60
+    assert [model.label for model in config.vessel_models] == ["artery", "vein"]
+    assert config.manual_segmentation is not None
 
 
 def test_case_config_loads_strict_manual_segmentation_mode(tmp_path):
@@ -317,37 +315,10 @@ def test_case_config_accepts_an_explicit_dicom_series_uid(tmp_path):
     organ_models = "\n".join(f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS)
     config_path = tmp_path / "case.yaml"
     config_path.write_text(
-        _case_yaml(organ_models) + "\ndicom_series_uid: 1.2.840.113619.2.55.3\n",
+        _case_yaml(organ_models) + "\ndicom_series_uid: 1.2.840.99999.1\n",
         encoding="utf-8",
     )
 
     config = load_case_config(config_path)
 
-    assert config.dicom_series_uid == "1.2.840.113619.2.55.3"
-
-
-def test_rejected_audit_config_resolves_dicom_and_output_paths(tmp_path):
-    module = importlib.import_module("ct_vascular_resampling.rejected_audit")
-    config_path = tmp_path / "audit.yaml"
-    config_path.write_text(
-        """ct_path: dicom
-dicom_series_uid: 1.2.3
-rejected_jsonl: case/rejected/rejected.jsonl
-output_directory: case/rejected/diagnostics
-filtering:
-  black_threshold: 50
-  black_ratio_limit: 0.5
-  line_min_diagonal_fraction: 0.6
-representative_limit_per_cause: 30
-""",
-        encoding="utf-8",
-    )
-
-    config = module.load_rejected_audit_config(config_path)
-
-    assert config.ct_path == tmp_path / "dicom"
-    assert config.dicom_series_uid == "1.2.3"
-    assert config.rejected_jsonl == tmp_path / "case/rejected/rejected.jsonl"
-    assert config.output_directory == tmp_path / "case/rejected/diagnostics"
-    assert config.filtering.black_ratio_limit == 0.5
-    assert config.representative_limit_per_cause == 30
+    assert config.dicom_series_uid == "1.2.840.99999.1"
