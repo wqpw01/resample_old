@@ -4,13 +4,48 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ct-vascular-resampling"
-version = "0.1.0"
-description = "无 P/N/D 输入的 CT 与血管模型重采样图库"
+version = "1.0.0"
+description = "Reproducible CT-EUS manual-segmentation and expanded full-resampling pipeline"
+readme = "README.md"
 requires-python = ">=3.12"
+license = {file = "LICENSE"}
+authors = [{name = "Anonymous Authors"}]
+keywords = ["CT", "EUS", "medical imaging", "resampling", "vascular imaging"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: BSD License",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "scikit-image>=0.25",
+  "SimpleITK>=2.3",
+  "trimesh>=4.0",
+  "rtree>=1.4",
+  "Pillow>=10.0",
+  "PyYAML>=6.0",
+  "opencv-python-headless>=4.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+gpu = ["cupy-cuda13x==14.1.1"]
+
+[project.scripts]
+ct-vessel-resampling = "ct_vascular_resampling.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
 ct_vascular_resampling = ["data/*.json"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]

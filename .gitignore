@@ -8,3 +8,9 @@ build/
 *.egg-info/
 output/
 logs/
+.superpowers/
+.work/
+case_data/
+registration/
+run/
+*.tar.gz
