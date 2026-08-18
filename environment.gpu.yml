@@ -13,6 +13,7 @@ dependencies:
   - pillow
   - pyyaml
   - opencv
+  - plotly
   - pytest
   - pip
   - pip:

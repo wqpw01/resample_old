@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ct-vascular-resampling"
-version = "1.0.0"
+version = "1.0.1"
 description = "Reproducible CT-EUS manual-segmentation and expanded full-resampling pipeline"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -31,8 +31,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "plotly>=5.0"]
 gpu = ["cupy-cuda13x==14.1.1"]
+paper = ["plotly>=5.0"]
 
 [project.scripts]
 ct-vessel-resampling = "ct_vascular_resampling.cli:main"

@@ -61,7 +61,7 @@ python -m pip install -e .
 
 The GPU backend uses CuPy and is calibrated against the CPU reference before production sampling. `runtime.backend: auto` falls back to CPU if GPU initialization or calibration fails; `gpu` fails explicitly instead of silently changing backends.
 
-The formal server environment was validated with Python 3.12, SimpleITK 2.5.5, NumPy 2.5.1, SciPy 1.18.0, scikit-image 0.26.0, trimesh 4.12.2, rtree 1.4.1, Pillow 12.3.0, PyYAML 6.0.3, OpenCV 5.0.0 and CuPy 14.1.1 on an NVIDIA RTX 4080 SUPER.
+The formal server environment was validated with Python 3.12, SimpleITK 2.5.5, NumPy 2.5.1, SciPy 1.18.0, scikit-image 0.26.0, trimesh 4.12.2, rtree 1.4.1, Pillow 12.3.0, PyYAML 6.0.3, OpenCV 5.0.0, Plotly and CuPy 14.1.1 on an NVIDIA RTX 4080 SUPER. Plotly is required only for `paper_figures/` and its tests; a minimal core installation may omit the `paper` extra.
 
 ## Input Data / 输入格式
 
@@ -199,8 +199,8 @@ On an internet-connected workstation:
 ```bash
 git clone <repository-url> ct_vascular_resampling
 cd ct_vascular_resampling
-git checkout v1.0.0-paper
-git archive --format=tar.gz --output=ct_vascular_resampling-v1.0.0-paper.tar.gz v1.0.0-paper
+git checkout v1.0.1-paper
+git archive --format=tar.gz --output=ct_vascular_resampling-v1.0.1-paper.tar.gz v1.0.1-paper
 ```
 
 Create the mamba environment on a compatible online machine and package it with `conda-pack`, or manually transfer an existing validated environment. Transfer the source archive, packed environment and case data to the offline GPU server. Extract them into separate project and data directories; do not embed case data in the Git repository.

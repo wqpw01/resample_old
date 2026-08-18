@@ -62,18 +62,25 @@ from .sampling_pipeline import ORGAN_ORDER, PoseStream, SquareSample, SurfaceSam
 from .squares import PITCH_ANGLES_DEGREES, ROLL_ANGLES_DEGREES, YAW_ANGLES_DEGREES
 
 
+_ARCHIVE_GIT_COMMIT = "$Format:%H$"
+
+
 @cache
 def _build_git_commit() -> str:
     candidate = os.environ.get("CT_VASCULAR_RESAMPLING_GIT_COMMIT", "").strip().lower()
     if not candidate:
         repository = Path(__file__).resolve().parents[2]
-        result = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        candidate = result.stdout.strip().lower()
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            candidate = _ARCHIVE_GIT_COMMIT.lower()
+        else:
+            candidate = result.stdout.strip().lower()
     if len(candidate) != 40 or any(character not in "0123456789abcdef" for character in candidate):
         raise RuntimeError("无法确定有效的构建 Git commit")
     return candidate

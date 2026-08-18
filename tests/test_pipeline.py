@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 import pytest
 import SimpleITK as sitk
+import subprocess
 import trimesh
 from pathlib import Path
 from dataclasses import replace
@@ -63,6 +64,25 @@ def _manual_segmentation_config(path: Path) -> ManualSegmentationConfig:
             "portal_vein": (170, 85, 255),
         },
     )
+
+
+def test_build_git_commit_uses_exported_archive_metadata_without_git(monkeypatch):
+    exported_commit = "a" * 40
+    monkeypatch.delenv("CT_VASCULAR_RESAMPLING_GIT_COMMIT", raising=False)
+    monkeypatch.setattr(
+        pipeline_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"])
+        ),
+    )
+    monkeypatch.setattr(pipeline_module, "_ARCHIVE_GIT_COMMIT", exported_commit, raising=False)
+    pipeline_module._build_git_commit.cache_clear()
+
+    try:
+        assert pipeline_module._build_git_commit() == exported_commit
+    finally:
+        pipeline_module._build_git_commit.cache_clear()
 
 
 def test_manual_precomputed_square_adds_eus_outputs_without_changing_original_vessels(tmp_path):
