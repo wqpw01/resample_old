@@ -25,13 +25,25 @@ from ct_vascular_resampling.config import (
     VesselModel,
 )
 from ct_vascular_resampling.centerline import CenterlinePath, CenterlineSelectionAudit
+from ct_vascular_resampling.contract import CORE_DESIGN_FILENAME, CORE_DESIGN_SHA256
 from ct_vascular_resampling.ct_resampling import CTVolume, diagnose_square_fov
 from ct_vascular_resampling.gallery import GalleryWriter
 from ct_vascular_resampling.label_resampling import CpuLabelBackend
 import ct_vascular_resampling.pipeline as pipeline_module
 from ct_vascular_resampling.pipeline import PreparedVessel, render_precomputed_square, run_case
 from ct_vascular_resampling.resampling_backend import CachedCpuBackend
+from ct_vascular_resampling.sampling import SamplingStatistics
 from ct_vascular_resampling.sampling_pipeline import SquareSample, SurfaceSamples
+
+
+_FORMAL_SETTINGS_VALIDATOR = pipeline_module._validate_formal_contract_settings
+
+
+@pytest.fixture(autouse=True)
+def _allow_reduced_synthetic_protocol(monkeypatch):
+    """本模块的集成夹具使用 10 mm/20 px；正式参数门禁由独立测试覆盖。"""
+
+    monkeypatch.setattr(pipeline_module, "_validate_formal_contract_settings", lambda _config: None)
 
 
 def _manual_segmentation_config(path: Path) -> ManualSegmentationConfig:
@@ -78,11 +90,17 @@ def test_build_git_commit_uses_exported_archive_metadata_without_git(monkeypatch
     )
     monkeypatch.setattr(pipeline_module, "_ARCHIVE_GIT_COMMIT", exported_commit, raising=False)
     pipeline_module._build_git_commit.cache_clear()
-
     try:
         assert pipeline_module._build_git_commit() == exported_commit
     finally:
         pipeline_module._build_git_commit.cache_clear()
+
+
+def test_formal_design_amendment_matches_contract_sha256():
+    amendment = Path(__file__).parents[1] / "docs" / CORE_DESIGN_FILENAME
+
+    assert amendment.is_file()
+    assert hashlib.sha256(amendment.read_bytes()).hexdigest() == CORE_DESIGN_SHA256
 
 
 def test_manual_precomputed_square_adds_eus_outputs_without_changing_original_vessels(tmp_path):
@@ -360,6 +378,78 @@ def _manual_fov_case(tmp_path: Path) -> tuple[CaseConfig, SquareSample]:
     return _single_fov_case(tmp_path)
 
 
+def _formalized_test_config(config: CaseConfig) -> CaseConfig:
+    return replace(
+        config,
+        square=SquareConfig(),
+        ct=CTConfig(),
+        filtering=FilterConfig(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "invalid"),
+    [
+        ("sampling", "ray_length_mm", 99.0),
+        ("sampling", "ray_batch_size", 1024),
+        ("sampling", "minimum_spacing_mm", 9.0),
+        ("sampling", "centerline_voxel_pitch_mm", 2.0),
+        ("sampling", "centerline_tangent_window_mm", 9.0),
+        ("sampling", "centerline_max_terminal_spur_mm", 4.0),
+        ("square", "side_length_mm", 99.0),
+        ("ct", "output_resolution", 299),
+        ("ct", "window_level", 41.0),
+        ("ct", "window_width", 401.0),
+        ("ct", "fill_hu_value", -999.0),
+        ("filtering", "black_threshold", 49),
+        ("filtering", "black_ratio_limit", 0.59),
+        ("filtering", "line_min_diagonal_fraction", 0.69),
+        ("filtering", "black_side_min_ratio", 0.89),
+        ("filtering", "valid_side_max_black_ratio", 0.11),
+        ("runtime", "seed", 1),
+    ],
+)
+def test_formal_contract_rejects_changed_fixed_setting(tmp_path, section, field, invalid):
+    config, _ = _single_fov_case(tmp_path)
+    config = _formalized_test_config(config)
+    config = replace(
+        config,
+        **{section: replace(getattr(config, section), **{field: invalid})},
+    )
+
+    with pytest.raises(ValueError, match=field):
+        _FORMAL_SETTINGS_VALIDATOR(config)
+
+
+def test_preflight_applies_formal_contract_settings(monkeypatch, tmp_path):
+    config, _ = _single_fov_case(tmp_path)
+    config = _formalized_test_config(config)
+    config = replace(config, square=replace(config.square, side_length_mm=10.0))
+    monkeypatch.setattr(
+        pipeline_module,
+        "_validate_formal_contract_settings",
+        _FORMAL_SETTINGS_VALIDATOR,
+    )
+
+    with pytest.raises(ValueError, match="side_length_mm"):
+        pipeline_module._preflight(config)
+
+
+def test_formal_contract_rejects_nonpositive_point_count(tmp_path):
+    config, _ = _single_fov_case(tmp_path)
+    config = _formalized_test_config(config)
+    config = replace(
+        config,
+        sampling=replace(
+            config.sampling,
+            point_counts={**config.sampling.point_counts, "stomach": 0},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="point_counts"):
+        _FORMAL_SETTINGS_VALIDATOR(config)
+
+
 def test_manual_protocol_records_segmentation_geometry_mappings_and_sources(tmp_path):
     config, _ = _manual_fov_case(tmp_path)
     config = replace(
@@ -545,6 +635,50 @@ def test_run_refuses_orphaned_metadata_before_render(monkeypatch, tmp_path):
 
     assert (case_directory / "run_metadata.json").read_bytes() == metadata_before
     assert not (case_directory / "manifest.jsonl").exists()
+
+
+@pytest.mark.parametrize("step", ["sample", "square", "index"])
+def test_run_refuses_incompatible_protocol_before_non_render_writes(
+    monkeypatch,
+    tmp_path,
+    step,
+):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    run_case(config, steps=["render"], workers=1)
+    metadata_path = config.output_root / config.case_id / "run_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["resume_protocol_sha256"] = "0" * 64
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="运行协议|配置|构建|不一致"):
+        run_case(config, steps=[step], workers=1)
+
+
+def test_dry_run_skips_output_protocol_summaries(monkeypatch, tmp_path):
+    config, outside_sample = _manual_fov_case(tmp_path)
+    monkeypatch.setattr("ct_vascular_resampling.pipeline.sample_organs", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.generate_square_samples",
+        lambda *_: [outside_sample],
+    )
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline._pose_plan_summary",
+        lambda *_: (_ for _ in ()).throw(AssertionError("dry-run 不应生成姿态摘要")),
+    )
+    monkeypatch.setattr(
+        "ct_vascular_resampling.pipeline.build_sampling_point_plan",
+        lambda *_: (_ for _ in ()).throw(AssertionError("dry-run 不应生成逐点输出计划")),
+    )
+
+    summary = run_case(config, dry_run=True)
+
+    assert summary.dry_run is True
+    assert summary.total_squares == 1
 
 
 def test_manual_run_loads_labels_once_and_samples_same_square_batch_as_ct(monkeypatch, tmp_path):
@@ -1085,10 +1219,22 @@ def test_run_case_writes_manual_full_resampling_artifacts_and_gallery(monkeypatc
         "stomach": SurfaceSamples(
             np.asarray([[8.0, 8.0, 8.0]]),
             np.asarray([[0.0, 0.0, 1.0]]),
+            sampling_statistics={
+                "stomach": SamplingStatistics(1, 10, 1, 10.0, None),
+            },
             region_ids=("stomach",),
             target_ids=(("liver",),),
             zero_plane_anchor_world=np.asarray([0.0, 0.0, 0.0]),
             pancreas_special_x_limit=100.0,
+            source_surface_audit={
+                "enabled": True,
+                "selection_rule": "largest_watertight_absolute_volume",
+                "input_component_count": 1,
+                "input_face_count": 12,
+                "kept_face_count": 12,
+                "discarded_face_count": 0,
+                "selected_enclosed_volume_mm3": 8.0,
+            },
         ),
         "duodenum": SurfaceSamples(
             np.empty((0, 3), dtype=np.float64),
@@ -1120,10 +1266,58 @@ def test_run_case_writes_manual_full_resampling_artifacts_and_gallery(monkeypatc
     assert metadata["selected_backend"] == "cpu"
     assert metadata["total_squares"] == 3211
     assert metadata["coordinate_system"] == "RAS"
-    assert metadata["core_design_filename"] == "基于目标器官的采样方法-20260813.docx"
-    assert metadata["core_design_sha256"] == "de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca"
+    assert metadata["core_design_filename"] == "core-design-amendment-20260819.md"
+    assert metadata["core_design_sha256"] == CORE_DESIGN_SHA256
+    assert metadata["base_core_design_filename"] == "基于目标器官的采样方法-20260813.docx"
+    assert metadata["base_core_design_sha256"] == (
+        "de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca"
+    )
     assert len(metadata["build_git_commit"]) == 40
     assert metadata["minimum_point_spacing_mm"] == 10.0
+    assert metadata["sampling_point_plan"] == {
+        "schema_version": "sampling-point-plan/v1",
+        "organs": {
+            "stomach": [
+                {
+                    "point_index": 0,
+                    "probe_point_world": [8.0, 8.0, 8.0],
+                    "input_normal_world": [0.0, 0.0, 1.0],
+                    "source_region": "stomach",
+                    "yaw_policy": "standard",
+                    "target_ids": ["liver"],
+                    "base_local_axes_world": {
+                        "x": [0.0, 0.0, 1.0],
+                        "y": [0.7071067811865476, 0.7071067811865476, 0.0],
+                        "z": [-0.7071067811865476, 0.7071067811865476, 0.0],
+                    },
+                    "candidate_pose_count": 3211,
+                }
+            ],
+            "liver": [],
+            "pancreas": [],
+            "duodenum": [],
+            "esophagus": [],
+        },
+    }
+    assert metadata["sampling_configuration"]["count_policy"] == (
+        "upper_bound_preserve_outer_surface_and_minimum_spacing"
+    )
+    assert metadata["surface_sampling_audit"]["organs"]["stomach"] == {
+        "source_surface": surfaces["stomach"].source_surface_audit,
+        "regions": {
+            "stomach": {
+                "requested_count": 1,
+                "candidate_count": 10,
+                "actual_count": 1,
+                "shortfall_count": 0,
+                "minimum_spacing_mm": 10.0,
+                "actual_minimum_distance_mm": None,
+            }
+        },
+        "requested_count": 1,
+        "actual_count": 1,
+        "shortfall_count": 0,
+    }
     assert metadata["sampling_configuration"]["duodenum_centerline_endpoint_hints_ras_mm"] == {
         "proximal": [19.0, 24.0, 700.0],
         "distal": [-33.0, 1.0, 664.0],
@@ -1140,6 +1334,9 @@ def test_run_case_writes_manual_full_resampling_artifacts_and_gallery(monkeypatc
     assert metadata["pose_angles_degrees"]["pitch"] == list(np.arange(-30.0, 31.0, 5.0))
     assert metadata["pose_angles_degrees"]["yaw"]["duodenum_bulb"] == list(
         np.arange(-120.0, 31.0, 5.0)
+    )
+    assert metadata["pose_angles_degrees"]["yaw"]["liver_region_two"] == list(
+        np.arange(-60.0, 61.0, 5.0)
     )
     assert metadata["pose_convention"] == {
         "coordinate_frame": "local_right_handed",

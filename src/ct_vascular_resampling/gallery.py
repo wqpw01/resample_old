@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from .config import EUS_VESSEL_IDS, ORGAN_BOUNDARY_IDS
+from .contract import CORE_DESIGN_SHA256
 from .eus_organs import (
     EUSOrganCatalog,
     EUS_ORGAN_METADATA_SCHEMA_VERSION,
@@ -22,6 +23,7 @@ from .eus_organs import (
 from .geometry import SquareFrame
 from .manual_segmentation import EUS_VESSEL_METADATA_SCHEMA_VERSION
 from .quality import QualityResult
+from .squares import validate_pose_protocol
 from .rendering import RenderedSample
 
 
@@ -185,8 +187,21 @@ class GalleryWriter:
             raise ValueError("位姿 build_git_commit 必须为 40 位十六进制 Git commit")
         if not isinstance(record.get("source_region"), str) or not record["source_region"]:
             raise ValueError("位姿 source_region 必须为非空字符串")
-        if record.get("yaw_policy") not in {"standard", "duodenum_bulb", "pancreas_special"}:
+        if record.get("yaw_policy") not in {
+            "standard",
+            "duodenum_bulb",
+            "pancreas_special",
+            "liver_region_two",
+        }:
             raise ValueError("位姿 yaw_policy 不受支持")
+        if self.required_core_design_sha256 == CORE_DESIGN_SHA256:
+            validate_pose_protocol(
+                record.get("organ"),
+                record["source_region"],
+                record["yaw_policy"],
+                target_ids=record.get("target_ids"),
+                angles_degrees=record.get("angles_degrees"),
+            )
         angles = record.get("angles_degrees")
         if not isinstance(angles, dict) or set(angles) != {"roll", "pitch", "yaw"} or any(
             not self._is_finite_number(angles[axis]) for axis in ("roll", "pitch", "yaw")
@@ -201,10 +216,21 @@ class GalleryWriter:
                 not self._is_finite_number(component) for component in vector
             ):
                 raise ValueError(f"位姿 local_axes_world.{axis} 必须为三个有限数值")
-        for field in ("target_ids", "duplicate_source_regions"):
+        for field in (
+            "target_ids",
+            "duplicate_source_regions",
+            "duplicate_source_pose_ids",
+        ):
             values = record.get(field)
             if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
                 raise ValueError(f"位姿 {field} 必须为字符串列表")
+            if len(values) != len(set(values)):
+                raise ValueError(f"位姿 {field} 不得包含重复值")
+        matrix = np.column_stack([axes[axis] for axis in ("x", "y", "z")])
+        if not np.allclose(matrix.T @ matrix, np.eye(3), rtol=0.0, atol=1e-8) or np.linalg.det(
+            matrix
+        ) <= 0.0:
+            raise ValueError("位姿 local_axes_world 必须构成右手正交坐标系")
 
     def _validate_gallery_record(self, record: dict) -> None:
         validate_gallery_organ_metadata(
@@ -384,7 +410,7 @@ class GalleryWriter:
         with self._lock:
             if sample_id in self.completed_statuses:
                 return self.completed_statuses[sample_id]
-            self._validate_pose_record(pose_metadata or {})
+            self._validate_pose_record({**(pose_metadata or {}), "organ": organ})
             root = self.case_directory / "excluded_fov"
             ct_path = root / "ct" / f"{sample_id}.png"
             self._save_png(ct_image, ct_path)
@@ -435,7 +461,7 @@ class GalleryWriter:
 
         if sample_id in self.completed_statuses:
             return self.completed_statuses[sample_id]
-        self._validate_pose_record(pose_metadata or {})
+        self._validate_pose_record({**(pose_metadata or {}), "organ": organ})
         status = self._status_for(rendered, quality)
         if status == "gallery":
             if (

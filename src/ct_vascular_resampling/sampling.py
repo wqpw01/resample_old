@@ -27,6 +27,20 @@ class SamplingStatistics:
     minimum_spacing_mm: float
     actual_minimum_distance_mm: float | None
 
+    @property
+    def shortfall_count(self) -> int:
+        return max(self.requested_count - self.actual_count, 0)
+
+    def to_record(self) -> dict[str, int | float | None]:
+        return {
+            "requested_count": self.requested_count,
+            "candidate_count": self.candidate_count,
+            "actual_count": self.actual_count,
+            "shortfall_count": self.shortfall_count,
+            "minimum_spacing_mm": self.minimum_spacing_mm,
+            "actual_minimum_distance_mm": self.actual_minimum_distance_mm,
+        }
+
 
 @dataclass(frozen=True)
 class SamplingResult:
@@ -42,12 +56,24 @@ def sample_points_with_minimum_spacing(
     count: int,
     seed: int,
     minimum_spacing_mm: float,
+    fixed_points: np.ndarray | None = None,
 ) -> SamplingResult:
     point_values, normal_values = _paired_arrays(points, normals)
     if count < 0:
         raise ValueError("count 不能为负数")
     if minimum_spacing_mm <= 0.0:
         raise ValueError("minimum_spacing_mm 必须大于零")
+    original_indices = np.arange(len(point_values), dtype=np.int64)
+    fixed_values = np.empty((0, 3), dtype=np.float64)
+    if fixed_points is not None:
+        fixed_values = np.asarray(fixed_points, dtype=np.float64)
+        if fixed_values.ndim != 2 or fixed_values.shape[1] != 3:
+            raise ValueError("fixed_points 必须是 N×3 数组")
+        if len(fixed_values):
+            eligible = cKDTree(fixed_values).query(point_values, k=1)[0] >= minimum_spacing_mm - 1e-9
+            point_values = point_values[eligible]
+            normal_values = normal_values[eligible]
+            original_indices = original_indices[eligible]
     selected: list[int] = []
     if count and len(point_values):
         distances = np.full(len(point_values), np.inf, dtype=np.float64)
@@ -61,12 +87,16 @@ def sample_points_with_minimum_spacing(
             current = int(np.argmax(distances))
             if distances[current] < minimum_spacing_mm - 1e-9:
                 break
-    indices = np.asarray(selected, dtype=np.int64)
-    sampled_points = point_values[indices]
-    sampled_normals = normal_values[indices]
+    local_indices = np.asarray(selected, dtype=np.int64)
+    indices = original_indices[local_indices]
+    sampled_points = point_values[local_indices]
+    sampled_normals = normal_values[local_indices]
     actual_minimum: float | None = None
     if len(sampled_points) >= 2:
         actual_minimum = float(np.min(cKDTree(sampled_points).query(sampled_points, k=2)[0][:, 1]))
+    if len(sampled_points) and len(fixed_values):
+        fixed_minimum = float(np.min(cKDTree(fixed_values).query(sampled_points, k=1)[0]))
+        actual_minimum = fixed_minimum if actual_minimum is None else min(actual_minimum, fixed_minimum)
     return SamplingResult(
         sampled_points,
         sampled_normals,

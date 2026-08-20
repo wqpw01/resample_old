@@ -1,6 +1,6 @@
 # CT-EUS Manual Segmentation and Expanded Full Resampling
 
-面向 EUS 图像检索图库构建的可复现 CT 医学影像重采样管线。论文版本只保留两条正式能力：从手工 3D Slicer `.seg.nrrd` 准备输入，以及按 2026-08-13 核心设计执行扩大后三轴完整重采样。
+面向 EUS 图像检索图库构建的可复现 CT 医学影像重采样管线。论文版本只保留两条正式能力：从手工 3D Slicer `.seg.nrrd` 准备输入，以及按 2026-08-13 基准设计与 2026-08-19 正式修订执行三轴完整重采样。
 
 This repository provides a reproducible CT-to-EUS resampling pipeline for retrieval-gallery construction. The paper release intentionally retains only manual-segmentation input preparation and expanded full resampling.
 
@@ -9,14 +9,15 @@ This repository provides a reproducible CT-to-EUS resampling pipeline for retrie
 ## Method Summary / 方法概述
 
 - CT 与标签体必须共享 `Size`、`Spacing`、`Origin` 和 `Direction`；输入 LPS 物理坐标在计算边界统一转换为 RAS，体素数据不被预先重排。
-- 胃、肝、胰腺、十二指肠和食管按设计规则筛选采样区域；每个区域独立执行确定性 FPS，采样点间最小 RAS 欧氏距离为 `10 mm`。
+- 胃、肝、胰腺、十二指肠和食管先限定到最大闭合主外壳，再按设计规则筛选采样区域并执行确定性 FPS；同一器官合并点集的最小 RAS 欧氏距离为 `10 mm`。配置点数是上限，外表面无法满足数量时不降低间距补点。
 - 每个采样点是探头位置，并始终位于 `100 mm x 100 mm` 方形底边中点。旋转围绕该点进行，探头位置不移动。
 - 局部内禀旋转顺序为 `B' = B @ Rz(yaw) @ Ry(pitch) @ Rx(roll)`：
   - roll：`-45..+45 degrees`，步长 `5 degrees`；
   - pitch：`-30..+30 degrees`，步长 `5 degrees`；
   - standard yaw：`-30..+30 degrees`，步长 `5 degrees`；
+  - liver-region-two yaw：`-60..+60 degrees`，步长 `5 degrees`；
   - duodenal-bulb / pancreas-special yaw：`-120..+30 degrees`，步长 `5 degrees`。
-- 普通点每点产生 `3211` 个姿态，特殊偏航点每点产生 `7657` 个姿态；四顶点在 `atol=1e-9 mm` 下完全相同时精确去重。
+- 普通点每点产生 `3211` 个姿态，肝脏二区点产生 `6175` 个姿态，十二指肠球部和胰腺特殊偏航点产生 `7657` 个姿态；四顶点在 `atol=1e-9 mm` 下完全相同时精确去重。
 - CT 使用患者世界坐标三次 B-spline 插值；手工标签体在同一方形上使用最近邻插值。
 - 黑色像素比例只有在严格 `> 0.60` 时按比例规则拒绝，恰好 `0.60` 保留；直线黑边规则独立执行。
 
@@ -164,9 +165,12 @@ Then audit a completed library:
 ```bash
 python scripts/audit_resampling_output.py \
   output/case_001 \
+  --case-config data/case_001/prepared/case_manual_segmentation.yaml \
   --report output/case_001/audit_report.json \
   --check-pixels
 ```
+
+审计命令默认要求当前正式设计哈希；它会逐点核对 PLY 坐标/法线、从真实输入独立重建局部基准轴、复算运行协议摘要、检查完整角度笛卡尔积、精确去重来源姿态以及根/状态清单内容。使用人工十二指肠中心线时必须通过 `--case-config` 提供输出目录外的原病例 YAML，以锁定经病例确认的近端和远端。旧库必须显式传入其已确认的设计哈希，不能以未知哈希降级通过。
 
 ## Outputs / 输出结构
 
@@ -199,9 +203,11 @@ On an internet-connected workstation:
 ```bash
 git clone <repository-url> ct_vascular_resampling
 cd ct_vascular_resampling
-git checkout v1.0.1-paper
-git archive --format=tar.gz --output=ct_vascular_resampling-v1.0.1-paper.tar.gz v1.0.1-paper
+git checkout <validated-release-tag>
+git archive --format=tar.gz --output=ct_vascular_resampling.tar.gz <validated-release-tag>
 ```
+
+正式服务器只部署已提交并通过完整测试的固定 tag/commit；不得从脏工作树打包，否则运行元数据中的构建提交不能代表实际代码。
 
 Create the mamba environment on a compatible online machine and package it with `conda-pack`, or manually transfer an existing validated environment. Transfer the source archive, packed environment and case data to the offline GPU server. Extract them into separate project and data directories; do not embed case data in the Git repository.
 
@@ -225,7 +231,7 @@ python -m pip install --no-deps -e .
 ct-vessel-resampling --help
 ```
 
-The design contract filename, SHA-256, angle ranges and quality threshold are centralized in `ct_vascular_resampling.contract`. Current implementation traceability is documented in `docs/core-design-traceability-20260813.md`.
+The baseline design and the formal 2026-08-19 amendment, their SHA-256 identities, angle ranges and quality threshold are centralized in `ct_vascular_resampling.contract`. Current implementation traceability is documented in `docs/core-design-traceability-20260813.md` and `docs/core-design-amendment-20260819.md`.
 
 ## License and Citation
 

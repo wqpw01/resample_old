@@ -27,7 +27,32 @@ from .config import (
     FilterConfig,
     ManualSegmentationConfig,
 )
-from .contract import CORE_DESIGN_FILENAME, CORE_DESIGN_SHA256
+from .contract import (
+    BASE_CORE_DESIGN_FILENAME,
+    BASE_CORE_DESIGN_SHA256,
+    BLACK_RATIO_LIMIT,
+    BLACK_SIDE_MIN_RATIO,
+    BLACK_THRESHOLD,
+    CENTERLINE_MAX_TERMINAL_SPUR_MM,
+    CENTERLINE_TANGENT_WINDOW_MM,
+    CENTERLINE_VOXEL_PITCH_MM,
+    CORE_DESIGN_FILENAME,
+    CORE_DESIGN_SHA256,
+    ESOPHAGUS_EXTENSION_TARGET_FILTER,
+    FILL_HU_VALUE,
+    FOV_POLICY,
+    LINE_MIN_DIAGONAL_FRACTION,
+    MINIMUM_POINT_SPACING_MM,
+    OUTPUT_RESOLUTION,
+    POSE_CONVENTION,
+    RAY_BATCH_SIZE,
+    RAY_LENGTH_MM,
+    SAMPLING_SEED,
+    SQUARE_SIDE_LENGTH_MM,
+    VALID_SIDE_MAX_BLACK_RATIO,
+    WINDOW_LEVEL_HU,
+    WINDOW_WIDTH_HU,
+)
 from .coordinates import to_ras_direction, to_ras_points
 from .ct_resampling import (
     CTVolume,
@@ -56,9 +81,19 @@ from .manual_segmentation import analyze_manual_label_plane, apply_manual_label_
 from .mesh_io import load_surface_mesh
 from .indexing import build_library_summary
 from .quality import evaluate_ct_quality
+from .pose_plan import summarize_pose_entries
+from .protocol import resume_protocol_sha256
 from .resampling_backend import CachedCpuBackend, create_sampling_backend, validate_backend_against_cpu
 from .rendering import VesselLayer, render_sample_images
-from .sampling_pipeline import ORGAN_ORDER, PoseStream, SquareSample, SurfaceSamples, generate_square_samples, sample_organs
+from .sampling_pipeline import (
+    ORGAN_ORDER,
+    PoseStream,
+    SquareSample,
+    SurfaceSamples,
+    build_sampling_point_plan,
+    generate_square_samples,
+    sample_organs,
+)
 from .squares import PITCH_ANGLES_DEGREES, ROLL_ANGLES_DEGREES, YAW_ANGLES_DEGREES
 
 
@@ -108,7 +143,34 @@ def _pose_metadata(sample: SquareSample) -> dict[str, object]:
         },
         "target_ids": list(sample.target_ids),
         "duplicate_source_regions": list(sample.duplicate_source_regions),
+        "duplicate_source_pose_ids": list(sample.duplicate_source_pose_ids),
     }
+
+
+def _pose_plan_summary(samples: Iterable[SquareSample]) -> dict[str, int | str]:
+    entries = (
+        {
+            "slice_id": sample.sample_id,
+            "organ": sample.organ,
+            "probe_point_world": [float(value) for value in np.asarray(sample.probe_point_world)],
+            "input_normal_world": [
+                float(value) for value in np.asarray(sample.input_normal_world)
+            ],
+            "square_vertices_world": [
+                [float(value) for value in vertex]
+                for vertex in np.asarray(sample.vertices, dtype=np.float64)
+            ],
+            "source_region": sample.source_region,
+            "yaw_policy": sample.yaw_policy,
+            "angles_degrees": {
+                "roll": float(sample.roll_degrees),
+                "pitch": float(sample.pitch_degrees),
+                "yaw": float(sample.yaw_degrees),
+            },
+        }
+        for sample in samples
+    )
+    return summarize_pose_entries(entries)
 
 
 def _sha256_path(path: Path) -> str:
@@ -259,6 +321,9 @@ def _manual_segmentation_protocol(
 def _run_protocol_metadata(
     config: CaseConfig,
     duodenum_centerline_selection: dict[str, object] | None,
+    surface_sampling_audit: dict[str, object] | None = None,
+    pose_plan: dict[str, int | str] | None = None,
+    sampling_point_plan: dict[str, object] | None = None,
 ) -> dict[str, object]:
     endpoint_hints = config.sampling.duodenum_centerline_endpoint_hints_ras_mm
     eus_catalog = load_eus_organ_catalog()
@@ -268,6 +333,8 @@ def _run_protocol_metadata(
         "input_coordinate_system": config.geometry.input_coordinate_system,
         "core_design_filename": CORE_DESIGN_FILENAME,
         "core_design_sha256": CORE_DESIGN_SHA256,
+        "base_core_design_filename": BASE_CORE_DESIGN_FILENAME,
+        "base_core_design_sha256": BASE_CORE_DESIGN_SHA256,
         "build_git_commit": _build_git_commit(),
         "input_provenance": input_provenance,
         "sampling_configuration": {
@@ -275,7 +342,9 @@ def _run_protocol_metadata(
             "ray_length_mm": config.sampling.ray_length_mm,
             "ray_batch_size": config.sampling.ray_batch_size,
             "minimum_spacing_mm": config.sampling.minimum_spacing_mm,
-            "esophagus_extension_target_filter": "original_and_translated_segments_independently",
+            "count_policy": "upper_bound_preserve_outer_surface_and_minimum_spacing",
+            "source_surface_policy": "largest_watertight_absolute_volume",
+            "esophagus_extension_target_filter": ESOPHAGUS_EXTENSION_TARGET_FILTER,
             "centerline_voxel_pitch_mm": config.sampling.centerline_voxel_pitch_mm,
             "centerline_tangent_window_mm": config.sampling.centerline_tangent_window_mm,
             "centerline_max_terminal_spur_mm": config.sampling.centerline_max_terminal_spur_mm,
@@ -296,18 +365,15 @@ def _run_protocol_metadata(
         },
         "duodenum_centerline_selection": duodenum_centerline_selection,
         "minimum_point_spacing_mm": config.sampling.minimum_spacing_mm,
+        "surface_sampling_audit": surface_sampling_audit,
+        "pose_plan": pose_plan,
+        "sampling_point_plan": sampling_point_plan,
         "pose_angles_degrees": {
             "roll": list(ROLL_ANGLES_DEGREES),
             "pitch": list(PITCH_ANGLES_DEGREES),
             "yaw": {name: list(values) for name, values in YAW_ANGLES_DEGREES.items()},
         },
-        "pose_convention": {
-            "coordinate_frame": "local_right_handed",
-            "matrix_order": "B @ Rz(yaw) @ Ry(pitch) @ Rx(roll)",
-            "positive_yaw": "counterclockwise",
-            "yaw_observer": "local_positive_z_looking_toward_probe",
-            "rotation_center": "probe_at_square_bottom_edge_midpoint",
-        },
+        "pose_convention": dict(POSE_CONVENTION),
         "square_sampling": {
             "side_length_mm": config.square.side_length_mm,
             "output_resolution": [config.ct.output_resolution, config.ct.output_resolution],
@@ -324,12 +390,7 @@ def _run_protocol_metadata(
             "black_side_min_ratio": config.filtering.black_side_min_ratio,
             "valid_side_max_black_ratio": config.filtering.valid_side_max_black_ratio,
         },
-        "fov_policy": {
-            "vertex_rule": "any_square_vertex_outside_ct",
-            "outside_status": "excluded_fov",
-            "saved_artifacts": ["ct_png"],
-            "out_of_bounds_png_value": 0,
-        },
+        "fov_policy": {**FOV_POLICY, "saved_artifacts": list(FOV_POLICY["saved_artifacts"])},
         "eus_possible_organs": {
             "schema_version": eus_catalog.schema_version,
             "sha256": eus_catalog.sha256,
@@ -341,8 +402,7 @@ def _run_protocol_metadata(
     manual_protocol = _manual_segmentation_protocol(config, input_provenance)
     if manual_protocol is not None:
         protocol["manual_segmentation"] = manual_protocol
-    canonical = json.dumps(protocol, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    protocol["resume_protocol_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    protocol["resume_protocol_sha256"] = resume_protocol_sha256(protocol)
     return protocol
 
 
@@ -594,7 +654,74 @@ def _metadata_with_state(
     return result
 
 
+def _validate_formal_contract_settings(config: CaseConfig) -> None:
+    required_point_count_keys = {
+        "stomach",
+        "liver",
+        "pancreas",
+        "duodenum_part1",
+        "duodenum_part2",
+        "esophagus",
+    }
+    if set(config.sampling.point_counts) != required_point_count_keys or any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in config.sampling.point_counts.values()
+    ):
+        raise ValueError("sampling.point_counts 必须完整包含六个正整数上限")
+    expected = {
+        "sampling.ray_length_mm": (config.sampling.ray_length_mm, RAY_LENGTH_MM),
+        "sampling.ray_batch_size": (config.sampling.ray_batch_size, RAY_BATCH_SIZE),
+        "sampling.minimum_spacing_mm": (
+            config.sampling.minimum_spacing_mm,
+            MINIMUM_POINT_SPACING_MM,
+        ),
+        "sampling.centerline_voxel_pitch_mm": (
+            config.sampling.centerline_voxel_pitch_mm,
+            CENTERLINE_VOXEL_PITCH_MM,
+        ),
+        "sampling.centerline_tangent_window_mm": (
+            config.sampling.centerline_tangent_window_mm,
+            CENTERLINE_TANGENT_WINDOW_MM,
+        ),
+        "sampling.centerline_max_terminal_spur_mm": (
+            config.sampling.centerline_max_terminal_spur_mm,
+            CENTERLINE_MAX_TERMINAL_SPUR_MM,
+        ),
+        "square.side_length_mm": (config.square.side_length_mm, SQUARE_SIDE_LENGTH_MM),
+        "ct.output_resolution": (config.ct.output_resolution, OUTPUT_RESOLUTION),
+        "ct.window_level": (config.ct.window_level, WINDOW_LEVEL_HU),
+        "ct.window_width": (config.ct.window_width, WINDOW_WIDTH_HU),
+        "ct.fill_hu_value": (config.ct.fill_hu_value, FILL_HU_VALUE),
+        "filtering.black_threshold": (config.filtering.black_threshold, BLACK_THRESHOLD),
+        "filtering.black_ratio_limit": (
+            config.filtering.black_ratio_limit,
+            BLACK_RATIO_LIMIT,
+        ),
+        "filtering.line_min_diagonal_fraction": (
+            config.filtering.line_min_diagonal_fraction,
+            LINE_MIN_DIAGONAL_FRACTION,
+        ),
+        "filtering.black_side_min_ratio": (
+            config.filtering.black_side_min_ratio,
+            BLACK_SIDE_MIN_RATIO,
+        ),
+        "filtering.valid_side_max_black_ratio": (
+            config.filtering.valid_side_max_black_ratio,
+            VALID_SIDE_MAX_BLACK_RATIO,
+        ),
+        "runtime.seed": (config.runtime.seed, SAMPLING_SEED),
+    }
+    mismatches = [
+        f"{field}={actual!r}（合同值 {required!r}）"
+        for field, (actual, required) in expected.items()
+        if actual != required
+    ]
+    if mismatches:
+        raise ValueError("当前正式设计参数不一致: " + "; ".join(mismatches))
+
+
 def _preflight(config: CaseConfig) -> None:
+    _validate_formal_contract_settings(config)
     if not (config.ct_path.is_file() or config.ct_path.is_dir()):
         raise FileNotFoundError(f"CT 文件不存在: {config.ct_path}")
     for identifier, path in config.organ_models.items():
@@ -605,6 +732,28 @@ def _preflight(config: CaseConfig) -> None:
             raise FileNotFoundError(f"血管模型不存在 ({vessel.identifier}): {vessel.path}")
     if not config.manual_segmentation.path.is_file():
         raise FileNotFoundError(f"手工分割标签文件不存在: {config.manual_segmentation.path}")
+
+
+def _load_compatible_run_metadata(
+    case_directory: Path,
+    protocol_metadata: dict[str, object],
+) -> dict[str, object] | None:
+    metadata_path = case_directory / "run_metadata.json"
+    manifest_path = case_directory / "manifest.jsonl"
+    manifest_has_records = manifest_path.is_file() and manifest_path.stat().st_size > 0
+    if manifest_has_records and not metadata_path.is_file():
+        raise ValueError("已有 manifest.jsonl 但缺少 run_metadata.json，无法验证恢复运行协议")
+    if not metadata_path.is_file():
+        return None
+    if not manifest_has_records:
+        raise ValueError("检测到 run_metadata.json 但缺少非空 manifest.jsonl，输出状态不完整")
+    try:
+        previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        raise ValueError(f"无法读取既有运行元数据: {error}") from error
+    if previous_metadata.get("resume_protocol_sha256") != protocol_metadata["resume_protocol_sha256"]:
+        raise ValueError("当前配置、设计或构建与既有结果的运行协议不一致；请使用新的输出目录")
+    return previous_metadata
 
 
 def _artifact_name(organ: str) -> str:
@@ -620,7 +769,35 @@ class _PosePlan:
     protocol_metadata: dict[str, object]
 
 
-def _prepare_pose_plan(config: CaseConfig) -> _PosePlan:
+def _surface_sampling_audit(surfaces: dict[str, SurfaceSamples]) -> dict[str, object]:
+    organs: dict[str, object] = {}
+    for organ in ORGAN_ORDER:
+        surface = surfaces.get(organ, SurfaceSamples([], []))
+        region_statistics = {
+            region: statistics.to_record()
+            for region, statistics in sorted(surface.sampling_statistics.items())
+        }
+        requested_count = sum(value.requested_count for value in surface.sampling_statistics.values())
+        actual_count = len(surface.points)
+        organs[organ] = {
+            "source_surface": surface.source_surface_audit,
+            "regions": region_statistics,
+            "requested_count": requested_count,
+            "actual_count": actual_count,
+            "shortfall_count": max(requested_count - actual_count, 0),
+        }
+    return {
+        "outer_surface_required": True,
+        "minimum_spacing_preserved_on_shortfall": True,
+        "organs": organs,
+    }
+
+
+def _prepare_pose_plan(
+    config: CaseConfig,
+    *,
+    include_protocol_metadata: bool = True,
+) -> _PosePlan:
     _preflight(config)
     surfaces = sample_organs(
         config.organ_models,
@@ -635,7 +812,15 @@ def _prepare_pose_plan(config: CaseConfig) -> _PosePlan:
     centerline_selection = selection_audit.to_record() if selection_audit is not None else None
     samples = generate_square_samples(surfaces, config.square)
     sampled_counts = {organ: len(surfaces.get(organ, SurfaceSamples([], [])).points) for organ in ORGAN_ORDER}
-    protocol_metadata = _run_protocol_metadata(config, centerline_selection)
+    protocol_metadata: dict[str, object] = {}
+    if include_protocol_metadata:
+        protocol_metadata = _run_protocol_metadata(
+            config,
+            centerline_selection,
+            surface_sampling_audit=_surface_sampling_audit(surfaces),
+            pose_plan=_pose_plan_summary(samples),
+            sampling_point_plan=build_sampling_point_plan(surfaces),
+        )
     return _PosePlan(surfaces, samples, sampled_counts, centerline_selection, protocol_metadata)
 
 
@@ -756,7 +941,7 @@ def run_case(
         selected = {"sample", "square", "render", "index"}
     if "filter" in selected:
         selected.add("render")
-    plan = _prepare_pose_plan(config)
+    plan = _prepare_pose_plan(config, include_protocol_metadata=not dry_run)
     surfaces = plan.surfaces
     samples = plan.samples
     sampled_counts = plan.sampled_counts
@@ -768,26 +953,12 @@ def run_case(
     has_run_artifacts = case_directory.exists() and any(path.name != "logs" for path in case_directory.iterdir())
     if has_run_artifacts and not resume and selected & {"sample", "square", "render"}:
         raise FileExistsError(f"输出目录已有内容，请启用恢复模式: {case_directory}")
+    previous_metadata = _load_compatible_run_metadata(case_directory, protocol_metadata)
     statuses: Counter[str] = Counter()
     writer: GalleryWriter | None = None
-    previous_metadata: dict[str, object] | None = None
     compatible_build_git_commits: set[str] = set()
     calibration_samples: list[SquareSample] = []
     if "render" in selected:
-        metadata_path = case_directory / "run_metadata.json"
-        manifest_path = case_directory / "manifest.jsonl"
-        manifest_has_records = manifest_path.is_file() and manifest_path.stat().st_size > 0
-        if manifest_has_records:
-            if not metadata_path.is_file():
-                raise ValueError("已有 manifest.jsonl 但缺少 run_metadata.json，无法验证恢复运行协议")
-            try:
-                previous_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as error:
-                raise ValueError(f"无法读取既有运行元数据: {error}") from error
-            if previous_metadata.get("resume_protocol_sha256") != protocol_metadata["resume_protocol_sha256"]:
-                raise ValueError("当前配置、设计或构建与既有结果的运行协议不一致；请使用新的输出目录")
-        elif metadata_path.is_file():
-            raise ValueError("检测到 run_metadata.json 但缺少非空 manifest.jsonl，输出状态不完整")
         writer = GalleryWriter(
             case_directory,
             config.case_id,

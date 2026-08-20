@@ -4,6 +4,7 @@ import numpy as np
 
 from ct_vascular_resampling.centerline import CenterlinePath
 from ct_vascular_resampling.squares import (
+    LIVER_REGION_TWO_YAW,
     PANCREAS_SPECIAL_YAW,
     STANDARD_YAW,
     DUODENUM_BULB_YAW,
@@ -53,15 +54,18 @@ def test_pose_variants_use_confirmed_roll_pitch_and_region_yaw_ranges():
     standard = generate_pose_variants(np.zeros(3), frame, 100.0, STANDARD_YAW)
     bulb = generate_pose_variants(np.zeros(3), frame, 100.0, DUODENUM_BULB_YAW)
     special = generate_pose_variants(np.zeros(3), frame, 100.0, PANCREAS_SPECIAL_YAW)
+    liver_two = generate_pose_variants(np.zeros(3), frame, 100.0, LIVER_REGION_TWO_YAW)
 
     assert {value.roll_degrees for value in standard} == set(np.arange(-45.0, 46.0, 5.0))
     assert {value.pitch_degrees for value in standard} == set(np.arange(-30.0, 31.0, 5.0))
     assert {value.yaw_degrees for value in standard} == set(np.arange(-30.0, 31.0, 5.0))
     assert {value.yaw_degrees for value in bulb} == set(np.arange(-120.0, 31.0, 5.0))
     assert {value.yaw_degrees for value in special} == set(np.arange(-120.0, 31.0, 5.0))
+    assert {value.yaw_degrees for value in liver_two} == set(np.arange(-60.0, 61.0, 5.0))
     assert len(standard) == 3211
     assert len(bulb) == 7657
     assert len(special) == 7657
+    assert len(liver_two) == 6175
 
 
 def test_positive_yaw_is_counterclockwise_when_viewed_from_local_positive_z():

@@ -1,1 +1,2 @@
 src/ct_vascular_resampling/pipeline.py export-subst
+docs/core-design-amendment-20260819.md text eol=lf

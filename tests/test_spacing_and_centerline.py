@@ -39,10 +39,35 @@ def test_constrained_fps_stops_at_ten_mm_and_preserves_point_normal_pairs():
     assert first.stats.requested_count == 5
     assert first.stats.candidate_count == 5
     assert first.stats.actual_count == 3
+    assert first.stats.shortfall_count == 2
     assert first.stats.actual_minimum_distance_mm == pytest.approx(10.0)
     assert np.array_equal(first.indices, [4, 0, 2])
     for point, normal in zip(first.points, first.normals, strict=True):
         assert normal[0] == points.tolist().index(point.tolist())
+
+
+def test_constrained_fps_excludes_candidates_too_close_to_fixed_points():
+    points = np.asarray(
+        [[0.2, 0.0, 0.0], [10.2, 0.0, 0.0], [20.2, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    normals = np.asarray([[1.0, 0.0, 0.0]] * 3)
+    fixed = np.asarray([[0.0, 0.0, 0.0]])
+
+    result = sample_points_with_minimum_spacing(
+        points,
+        normals,
+        count=3,
+        seed=0,
+        minimum_spacing_mm=10.0,
+        fixed_points=fixed,
+    )
+
+    assert result.stats.candidate_count == 2
+    assert result.stats.actual_count == 2
+    assert result.stats.shortfall_count == 1
+    assert set(result.indices.tolist()) == {1, 2}
+    assert np.all(np.linalg.norm(result.points - fixed[0], axis=1) >= 10.0 - 1e-9)
 
 
 def test_skeleton_order_prunes_only_a_short_terminal_spur():

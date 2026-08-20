@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 import pytest
 
+from ct_vascular_resampling.contract import CORE_DESIGN_SHA256
 from ct_vascular_resampling.gallery import GalleryWriter, write_rectangles_ply
 from ct_vascular_resampling.geometry import frame_from_vertices
 from ct_vascular_resampling.quality import QualityResult
@@ -566,6 +567,129 @@ def test_gallery_writer_strict_pose_protocol_rejects_legacy_completed_record(tmp
             case_id="case_001",
             required_core_design_sha256="de56e7a1b984f925e97631b076d6b729e77575eb6513b4d57f3028818b7e71ca",
         )
+
+
+@pytest.mark.parametrize(
+    ("source_region", "yaw_policy"),
+    [
+        ("liver_region_two", "standard"),
+        ("liver_region_one", "liver_region_two"),
+    ],
+)
+def test_current_design_pose_protocol_rejects_liver_region_two_policy_mismatch(
+    tmp_path,
+    source_region,
+    yaw_policy,
+):
+    writer = GalleryWriter(
+        tmp_path / "case_001",
+        case_id="case_001",
+        required_core_design_sha256=CORE_DESIGN_SHA256,
+    )
+    record = {
+        "coordinate_system": "RAS",
+        "core_design_sha256": CORE_DESIGN_SHA256,
+        "build_git_commit": "a" * 40,
+        "organ": "liver",
+        "source_region": source_region,
+        "yaw_policy": yaw_policy,
+        "angles_degrees": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+        "local_axes_world": {
+            "x": [1.0, 0.0, 0.0],
+            "y": [0.0, 1.0, 0.0],
+            "z": [0.0, 0.0, 1.0],
+        },
+        "target_ids": [],
+        "duplicate_source_regions": [],
+        "duplicate_source_pose_ids": [],
+    }
+
+    with pytest.raises(ValueError, match="肝脏二区|yaw_policy"):
+        writer._validate_pose_record(record)
+
+
+def test_current_design_pose_protocol_rejects_cross_organ_yaw_policy(tmp_path):
+    writer = GalleryWriter(
+        tmp_path / "case_001",
+        case_id="case_001",
+        required_core_design_sha256=CORE_DESIGN_SHA256,
+    )
+    record = {
+        "coordinate_system": "RAS",
+        "core_design_sha256": CORE_DESIGN_SHA256,
+        "build_git_commit": "a" * 40,
+        "organ": "liver",
+        "source_region": "liver_region_one",
+        "yaw_policy": "pancreas_special",
+        "angles_degrees": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+        "local_axes_world": {
+            "x": [1.0, 0.0, 0.0],
+            "y": [0.0, 1.0, 0.0],
+            "z": [0.0, 0.0, 1.0],
+        },
+        "target_ids": [],
+        "duplicate_source_regions": [],
+        "duplicate_source_pose_ids": [],
+    }
+
+    with pytest.raises(ValueError, match="器官|区域|yaw_policy"):
+        writer._validate_pose_record(record)
+
+
+def test_current_design_pose_protocol_rejects_angle_outside_contract_set(tmp_path):
+    writer = GalleryWriter(
+        tmp_path / "case_001",
+        case_id="case_001",
+        required_core_design_sha256=CORE_DESIGN_SHA256,
+    )
+    record = {
+        "coordinate_system": "RAS",
+        "core_design_sha256": CORE_DESIGN_SHA256,
+        "build_git_commit": "a" * 40,
+        "organ": "liver",
+        "source_region": "liver_region_two",
+        "yaw_policy": "liver_region_two",
+        "angles_degrees": {"roll": 0.0, "pitch": 0.0, "yaw": 55.5},
+        "local_axes_world": {
+            "x": [1.0, 0.0, 0.0],
+            "y": [0.0, 1.0, 0.0],
+            "z": [0.0, 0.0, 1.0],
+        },
+        "target_ids": [],
+        "duplicate_source_regions": [],
+        "duplicate_source_pose_ids": [],
+    }
+
+    with pytest.raises(ValueError, match="角度|yaw"):
+        writer._validate_pose_record(record)
+
+
+def test_current_design_pose_protocol_rejects_duplicate_deduplication_evidence(tmp_path):
+    writer = GalleryWriter(
+        tmp_path / "case_001",
+        case_id="case_001",
+        required_core_design_sha256=CORE_DESIGN_SHA256,
+    )
+    record = {
+        "coordinate_system": "RAS",
+        "core_design_sha256": CORE_DESIGN_SHA256,
+        "build_git_commit": "a" * 40,
+        "organ": "liver",
+        "source_region": "liver_region_one",
+        "yaw_policy": "standard",
+        "angles_degrees": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+        "local_axes_world": {
+            "x": [1.0, 0.0, 0.0],
+            "y": [0.0, 1.0, 0.0],
+            "z": [0.0, 0.0, 1.0],
+        },
+        "target_ids": [],
+        "duplicate_source_regions": [],
+        "duplicate_source_pose_ids": ["stomach-000000", "stomach-000000"],
+    }
+
+    with pytest.raises(ValueError, match="重复"):
+        writer._validate_pose_record(record)
 
 
 def test_gallery_writer_rejects_duplicate_state_manifest_records(tmp_path):

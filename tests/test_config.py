@@ -110,6 +110,22 @@ def test_case_config_resolves_relative_paths_and_uses_confirmed_defaults(tmp_pat
     assert config.manual_segmentation is not None
 
 
+@pytest.mark.parametrize("invalid", ["true", "1.9", '"7"'])
+def test_case_config_rejects_non_integer_sampling_point_count(tmp_path, invalid):
+    organ_models = "\n".join(
+        f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS
+    )
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        _case_yaml(organ_models)
+        + f"\nsampling:\n  point_counts:\n    stomach: {invalid}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="point_counts.stomach.*整数"):
+        load_case_config(config_path)
+
+
 def test_case_config_loads_strict_manual_segmentation_mode(tmp_path):
     config = load_case_config(_write_manual_case(tmp_path, _valid_manual_segmentation()))
 
@@ -322,3 +338,47 @@ def test_case_config_accepts_an_explicit_dicom_series_uid(tmp_path):
     config = load_case_config(config_path)
 
     assert config.dicom_series_uid == "1.2.840.99999.1"
+
+
+@pytest.mark.parametrize(
+    ("section", "unknown_key"),
+    [
+        (None, "unexpected_top_level"),
+        ("geometry", "input_coordinate_systm"),
+        ("ct", "output_resoluton"),
+        ("filtering", "black_ratio_limt"),
+        ("runtime", "gpu_batch_sze"),
+        ("organ_models", "livre"),
+    ],
+)
+def test_case_config_rejects_unknown_mapping_keys(tmp_path, section, unknown_key):
+    organ_models = "\n".join(
+        f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS
+    )
+    raw = yaml.safe_load(_case_yaml(organ_models))
+    target = raw if section is None else raw.setdefault(section, {})
+    target[unknown_key] = "unexpected"
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=f"{unknown_key}|不支持"):
+        load_case_config(config_path)
+
+
+def test_case_config_rejects_unknown_vessel_item_key(tmp_path):
+    organ_models = "\n".join(
+        f"  {name}: models/{name}.obj" for name in REQUIRED_ORGAN_IDS
+    )
+    raw = yaml.safe_load(_case_yaml(organ_models))
+    raw["vessel_models"][0]["colour"] = [255, 82, 0]
+    config_path = tmp_path / "case.yaml"
+    config_path.write_text(
+        yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="colour|不支持"):
+        load_case_config(config_path)

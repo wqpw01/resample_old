@@ -9,7 +9,25 @@ from typing import Any
 
 import yaml
 
-from .contract import BLACK_RATIO_LIMIT
+from .contract import (
+    BLACK_RATIO_LIMIT,
+    BLACK_SIDE_MIN_RATIO,
+    BLACK_THRESHOLD,
+    CENTERLINE_MAX_TERMINAL_SPUR_MM,
+    CENTERLINE_TANGENT_WINDOW_MM,
+    CENTERLINE_VOXEL_PITCH_MM,
+    FILL_HU_VALUE,
+    LINE_MIN_DIAGONAL_FRACTION,
+    MINIMUM_POINT_SPACING_MM,
+    OUTPUT_RESOLUTION,
+    RAY_BATCH_SIZE,
+    RAY_LENGTH_MM,
+    SAMPLING_SEED,
+    SQUARE_SIDE_LENGTH_MM,
+    VALID_SIDE_MAX_BLACK_RATIO,
+    WINDOW_LEVEL_HU,
+    WINDOW_WIDTH_HU,
+)
 
 
 REQUIRED_ORGAN_IDS = (
@@ -88,12 +106,12 @@ class VesselModel:
 @dataclass(frozen=True)
 class SamplingConfig:
     point_counts: dict[str, int]
-    ray_length_mm: float = 100.0
-    ray_batch_size: int = 2048
-    minimum_spacing_mm: float = 10.0
-    centerline_voxel_pitch_mm: float = 1.0
-    centerline_tangent_window_mm: float = 10.0
-    centerline_max_terminal_spur_mm: float = 5.0
+    ray_length_mm: float = RAY_LENGTH_MM
+    ray_batch_size: int = RAY_BATCH_SIZE
+    minimum_spacing_mm: float = MINIMUM_POINT_SPACING_MM
+    centerline_voxel_pitch_mm: float = CENTERLINE_VOXEL_PITCH_MM
+    centerline_tangent_window_mm: float = CENTERLINE_TANGENT_WINDOW_MM
+    centerline_max_terminal_spur_mm: float = CENTERLINE_MAX_TERMINAL_SPUR_MM
     duodenum_centerline_endpoint_hints_ras_mm: (
         tuple[tuple[float, float, float], tuple[float, float, float]] | None
     ) = None
@@ -102,29 +120,29 @@ class SamplingConfig:
 
 @dataclass(frozen=True)
 class SquareConfig:
-    side_length_mm: float = 100.0
+    side_length_mm: float = SQUARE_SIDE_LENGTH_MM
 
 
 @dataclass(frozen=True)
 class CTConfig:
-    output_resolution: int = 300
-    window_level: float = 40.0
-    window_width: float = 400.0
-    fill_hu_value: float = -1000.0
+    output_resolution: int = OUTPUT_RESOLUTION
+    window_level: float = WINDOW_LEVEL_HU
+    window_width: float = WINDOW_WIDTH_HU
+    fill_hu_value: float = FILL_HU_VALUE
 
 
 @dataclass(frozen=True)
 class FilterConfig:
-    black_threshold: int = 50
+    black_threshold: int = BLACK_THRESHOLD
     black_ratio_limit: float = BLACK_RATIO_LIMIT
-    line_min_diagonal_fraction: float = 0.70
-    black_side_min_ratio: float = 0.90
-    valid_side_max_black_ratio: float = 0.10
+    line_min_diagonal_fraction: float = LINE_MIN_DIAGONAL_FRACTION
+    black_side_min_ratio: float = BLACK_SIDE_MIN_RATIO
+    valid_side_max_black_ratio: float = VALID_SIDE_MAX_BLACK_RATIO
 
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    seed: int = 0
+    seed: int = SAMPLING_SEED
     workers: int = 8
     backend: str = "auto"
     gpu_device: int = 0
@@ -175,8 +193,28 @@ def _mapping(value: Any, field: str) -> dict[str, Any]:
     return value
 
 
+def _reject_unexpected_keys(
+    values: dict[str, Any],
+    supported: set[str],
+    field: str,
+) -> None:
+    unexpected = sorted(set(values) - supported)
+    if unexpected:
+        raise ValueError(f"{field} 包含不支持的配置: {', '.join(unexpected)}")
+
+
+def _finite_number(value: Any, field: str, default: float) -> float:
+    source = default if value is None else value
+    if isinstance(source, bool) or not isinstance(source, (int, float)):
+        raise ValueError(f"{field} 必须是有限数值")
+    result = float(source)
+    if not math.isfinite(result):
+        raise ValueError(f"{field} 必须是有限数值")
+    return result
+
+
 def _number(value: Any, field: str, default: float) -> float:
-    result = default if value is None else float(value)
+    result = _finite_number(value, field, default)
     if not result > 0:
         raise ValueError(f"{field} 必须大于零")
     return result
@@ -194,14 +232,17 @@ def _finite_vector3(value: Any, field: str) -> tuple[float, float, float]:
 
 
 def _integer(value: Any, field: str, default: int, minimum: int = 1) -> int:
-    result = default if value is None else int(value)
+    source = default if value is None else value
+    if isinstance(source, bool) or not isinstance(source, int):
+        raise ValueError(f"{field} 必须是整数")
+    result = source
     if result < minimum:
         raise ValueError(f"{field} 必须不小于 {minimum}")
     return result
 
 
 def _ratio(value: Any, field: str, default: float, allow_zero: bool = True) -> float:
-    result = default if value is None else float(value)
+    result = _finite_number(value, field, default)
     lower_valid = result >= 0.0 if allow_zero else result > 0.0
     if not lower_valid or result > 1.0:
         raise ValueError(f"{field} 必须在 0-1 内")
@@ -224,6 +265,7 @@ def _load_vessels(raw: Any, config_directory: Path) -> tuple[VesselModel, ...]:
     ids: set[str] = set()
     for item in raw:
         values = _mapping(item, "vessel_models 项")
+        _reject_unexpected_keys(values, {"id", "path", "label", "color"}, "vessel_models 项")
         identifier = values.get("id")
         label = values.get("label")
         if not isinstance(identifier, str) or not identifier:
@@ -315,17 +357,35 @@ def _load_sampling(raw: Any) -> SamplingConfig:
             raise ValueError("sampling.duodenum_centerline_endpoint_match_tolerance_mm 必须是有限数值")
     return SamplingConfig(
         point_counts=counts,
-        ray_length_mm=_number(values.get("ray_length_mm"), "sampling.ray_length_mm", 100.0),
-        ray_batch_size=_integer(values.get("ray_batch_size"), "sampling.ray_batch_size", 2048),
-        minimum_spacing_mm=_number(values.get("minimum_spacing_mm"), "sampling.minimum_spacing_mm", 10.0),
+        ray_length_mm=_number(
+            values.get("ray_length_mm"),
+            "sampling.ray_length_mm",
+            RAY_LENGTH_MM,
+        ),
+        ray_batch_size=_integer(
+            values.get("ray_batch_size"),
+            "sampling.ray_batch_size",
+            RAY_BATCH_SIZE,
+        ),
+        minimum_spacing_mm=_number(
+            values.get("minimum_spacing_mm"),
+            "sampling.minimum_spacing_mm",
+            MINIMUM_POINT_SPACING_MM,
+        ),
         centerline_voxel_pitch_mm=_number(
-            values.get("centerline_voxel_pitch_mm"), "sampling.centerline_voxel_pitch_mm", 1.0
+            values.get("centerline_voxel_pitch_mm"),
+            "sampling.centerline_voxel_pitch_mm",
+            CENTERLINE_VOXEL_PITCH_MM,
         ),
         centerline_tangent_window_mm=_number(
-            values.get("centerline_tangent_window_mm"), "sampling.centerline_tangent_window_mm", 10.0
+            values.get("centerline_tangent_window_mm"),
+            "sampling.centerline_tangent_window_mm",
+            CENTERLINE_TANGENT_WINDOW_MM,
         ),
         centerline_max_terminal_spur_mm=_number(
-            values.get("centerline_max_terminal_spur_mm"), "sampling.centerline_max_terminal_spur_mm", 5.0
+            values.get("centerline_max_terminal_spur_mm"),
+            "sampling.centerline_max_terminal_spur_mm",
+            CENTERLINE_MAX_TERMINAL_SPUR_MM,
         ),
         duodenum_centerline_endpoint_hints_ras_mm=endpoint_hints,
         duodenum_centerline_endpoint_match_tolerance_mm=endpoint_tolerance,
@@ -334,6 +394,11 @@ def _load_sampling(raw: Any) -> SamplingConfig:
 
 def _load_geometry(raw: Any) -> GeometryConfig:
     values = _mapping(raw or {}, "geometry")
+    _reject_unexpected_keys(
+        values,
+        {"input_coordinate_system", "canonical_coordinate_system"},
+        "geometry",
+    )
     input_coordinate_system = str(values.get("input_coordinate_system", "LPS")).upper()
     canonical_coordinate_system = str(values.get("canonical_coordinate_system", "RAS")).upper()
     if input_coordinate_system not in {"LPS", "RAS"}:
@@ -348,23 +413,64 @@ def _load_square(raw: Any) -> SquareConfig:
     unexpected = set(values) - {"side_length_mm"}
     if unexpected:
         raise ValueError(f"square 包含不支持的配置: {', '.join(sorted(unexpected))}")
-    side_length = _number(values.get("side_length_mm"), "square.side_length_mm", 100.0)
+    side_length = _number(
+        values.get("side_length_mm"),
+        "square.side_length_mm",
+        SQUARE_SIDE_LENGTH_MM,
+    )
     return SquareConfig(side_length_mm=side_length)
 
 
 def _load_ct(raw: Any) -> CTConfig:
     values = _mapping(raw or {}, "ct")
+    _reject_unexpected_keys(
+        values,
+        {"output_resolution", "window_level", "window_width", "fill_hu_value"},
+        "ct",
+    )
     return CTConfig(
-        output_resolution=_integer(values.get("output_resolution"), "ct.output_resolution", 300),
-        window_level=float(values.get("window_level", 40.0)),
-        window_width=_number(values.get("window_width"), "ct.window_width", 400.0),
-        fill_hu_value=float(values.get("fill_hu_value", -1000.0)),
+        output_resolution=_integer(
+            values.get("output_resolution"),
+            "ct.output_resolution",
+            OUTPUT_RESOLUTION,
+        ),
+        window_level=_finite_number(
+            values.get("window_level"),
+            "ct.window_level",
+            WINDOW_LEVEL_HU,
+        ),
+        window_width=_number(
+            values.get("window_width"),
+            "ct.window_width",
+            WINDOW_WIDTH_HU,
+        ),
+        fill_hu_value=_finite_number(
+            values.get("fill_hu_value"),
+            "ct.fill_hu_value",
+            FILL_HU_VALUE,
+        ),
     )
 
 
 def _load_filter(raw: Any) -> FilterConfig:
     values = _mapping(raw or {}, "filtering")
-    black_threshold = _integer(values.get("black_threshold"), "filtering.black_threshold", 50, minimum=0)
+    _reject_unexpected_keys(
+        values,
+        {
+            "black_threshold",
+            "black_ratio_limit",
+            "line_min_diagonal_fraction",
+            "black_side_min_ratio",
+            "valid_side_max_black_ratio",
+        },
+        "filtering",
+    )
+    black_threshold = _integer(
+        values.get("black_threshold"),
+        "filtering.black_threshold",
+        BLACK_THRESHOLD,
+        minimum=0,
+    )
     if black_threshold > 255:
         raise ValueError("filtering.black_threshold 必须在 0-255 内")
     return FilterConfig(
@@ -375,21 +481,36 @@ def _load_filter(raw: Any) -> FilterConfig:
             BLACK_RATIO_LIMIT,
         ),
         line_min_diagonal_fraction=_ratio(
-            values.get("line_min_diagonal_fraction"), "filtering.line_min_diagonal_fraction", 0.70, allow_zero=False
+            values.get("line_min_diagonal_fraction"),
+            "filtering.line_min_diagonal_fraction",
+            LINE_MIN_DIAGONAL_FRACTION,
+            allow_zero=False,
         ),
-        black_side_min_ratio=_ratio(values.get("black_side_min_ratio"), "filtering.black_side_min_ratio", 0.90),
+        black_side_min_ratio=_ratio(
+            values.get("black_side_min_ratio"),
+            "filtering.black_side_min_ratio",
+            BLACK_SIDE_MIN_RATIO,
+        ),
         valid_side_max_black_ratio=_ratio(
-            values.get("valid_side_max_black_ratio"), "filtering.valid_side_max_black_ratio", 0.10),
+            values.get("valid_side_max_black_ratio"),
+            "filtering.valid_side_max_black_ratio",
+            VALID_SIDE_MAX_BLACK_RATIO,
+        ),
     )
 
 
 def _load_runtime(raw: Any) -> RuntimeConfig:
     values = _mapping(raw or {}, "runtime")
+    _reject_unexpected_keys(
+        values,
+        {"seed", "workers", "backend", "gpu_device", "gpu_batch_size"},
+        "runtime",
+    )
     backend = values.get("backend", "auto")
     if backend not in {"auto", "gpu", "cpu"}:
         raise ValueError("runtime.backend 必须是 auto、gpu 或 cpu")
     return RuntimeConfig(
-        seed=int(values.get("seed", 0)),
+        seed=_integer(values.get("seed"), "runtime.seed", SAMPLING_SEED, minimum=0),
         workers=_integer(values.get("workers"), "runtime.workers", 8),
         backend=backend,
         gpu_device=_integer(values.get("gpu_device"), "runtime.gpu_device", 0, minimum=0),
@@ -487,14 +608,31 @@ def load_case_config(path: str | Path) -> CaseConfig:
     values = _mapping(raw, "病例配置")
     if "registration_module_path" in values:
         raise ValueError("registration_module_path 已移除；论文版内部生成 library_summary.json")
+    _reject_unexpected_keys(
+        values,
+        {
+            "case_id",
+            "ct_path",
+            "output_root",
+            "organ_models",
+            "vessel_models",
+            "sampling",
+            "square",
+            "ct",
+            "filtering",
+            "runtime",
+            "geometry",
+            "dicom_series_uid",
+            "manual_segmentation",
+        },
+        "病例配置",
+    )
     config_directory = config_path.parent
     case_id = values.get("case_id")
     if not isinstance(case_id, str) or not case_id:
         raise ValueError("case_id 必须是非空字符串")
     organs_raw = _mapping(values.get("organ_models"), "organ_models")
-    missing = sorted(set(REQUIRED_ORGAN_IDS) - set(organs_raw))
-    if missing:
-        raise ValueError(f"organ_models 缺少源算法必需模型: {', '.join(missing)}")
+    _require_exact_keys(organs_raw, set(REQUIRED_ORGAN_IDS), "organ_models")
     organ_models = {
         name: _as_path(organs_raw[name], config_directory, f"organ_models.{name}") for name in REQUIRED_ORGAN_IDS
     }

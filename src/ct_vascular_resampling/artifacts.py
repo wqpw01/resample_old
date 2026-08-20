@@ -25,12 +25,12 @@ def write_surface_samples_ply(path: str | Path, samples: SurfaceSamples) -> None
         "ply",
         "format ascii 1.0",
         f"element vertex {len(samples.points)}",
-        "property float x",
-        "property float y",
-        "property float z",
-        "property float nx",
-        "property float ny",
-        "property float nz",
+        "property double x",
+        "property double y",
+        "property double z",
+        "property double nx",
+        "property double ny",
+        "property double nz",
         "end_header",
     ]
     lines.extend(

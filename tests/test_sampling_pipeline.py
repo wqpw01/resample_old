@@ -8,9 +8,12 @@ import ct_vascular_resampling.sampling_pipeline as sampling_pipeline_module
 from ct_vascular_resampling.centerline import CenterlinePath
 from ct_vascular_resampling.config import SamplingConfig, SquareConfig
 from ct_vascular_resampling.sampling_pipeline import (
+    build_sampling_point_plan,
     SquareSample,
     SurfaceSamples,
     _candidate_pose_count,
+    _assert_minimum_spacing,
+    _assert_samples_on_allowed_surface,
     _deduplicate_exact_poses,
     _merge_unique,
     _sample,
@@ -18,6 +21,65 @@ from ct_vascular_resampling.sampling_pipeline import (
     generate_square_samples,
     sample_organs,
 )
+
+
+def test_surface_vertex_postcondition_rejects_a_point_not_on_the_allowed_outer_surface():
+    allowed = np.asarray([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+    allowed_normals = np.asarray([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+
+    _assert_samples_on_allowed_surface(
+        np.asarray([[10.0, 0.0, 0.0]]),
+        np.asarray([[1.0, 0.0, 0.0]]),
+        allowed,
+        allowed_normals,
+        "liver",
+    )
+    with pytest.raises(ValueError, match="liver.*主外表面"):
+        _assert_samples_on_allowed_surface(
+            np.asarray([[9.999, 0.0, 0.0]]),
+            np.asarray([[1.0, 0.0, 0.0]]),
+            allowed,
+            allowed_normals,
+            "liver",
+        )
+
+
+def test_surface_postcondition_rejects_an_inward_normal_at_an_allowed_vertex():
+    with pytest.raises(ValueError, match="liver.*法线"):
+        _assert_samples_on_allowed_surface(
+            np.asarray([[10.0, 0.0, 0.0]]),
+            np.asarray([[-1.0, 0.0, 0.0]]),
+            np.asarray([[10.0, 0.0, 0.0]]),
+            np.asarray([[1.0, 0.0, 0.0]]),
+            "liver",
+        )
+
+
+def test_organ_postcondition_rejects_cross_region_spacing_violation():
+    _assert_minimum_spacing(
+        np.asarray([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]),
+        10.0,
+        "duodenum",
+    )
+    with pytest.raises(ValueError, match="duodenum.*10"):
+        _assert_minimum_spacing(
+            np.asarray([[0.0, 0.0, 0.0], [9.9, 0.0, 0.0]]),
+            10.0,
+            "duodenum",
+        )
+
+
+def test_sample_rejects_when_fixed_points_exclude_every_candidate():
+    with pytest.raises(ValueError, match="duodenum_remainder.*合法候选"):
+        _sample(
+            np.asarray([[0.2, 0.0, 0.0]]),
+            np.asarray([[1.0, 0.0, 0.0]]),
+            count=1,
+            seed=0,
+            minimum_spacing_mm=10.0,
+            region_id="duodenum_remainder",
+            fixed_points=np.asarray([[0.0, 0.0, 0.0]]),
+        )
 
 
 def test_square_sample_expansion_uses_confirmed_axis_count_and_variant_count():
@@ -114,6 +176,26 @@ def test_duodenum_pancreas_ray_hit_does_not_use_the_stomach_pancreas_special_yaw
     assert {sample.yaw_policy for sample in samples} == {"standard"}
 
 
+@pytest.mark.parametrize("region_id", ["liver_region_two", "liver_region_one+liver_region_two"])
+def test_liver_region_two_membership_uses_formal_sixty_degree_yaw(region_id):
+    surfaces = {
+        "liver": SurfaceSamples(
+            np.asarray([[0.0, 0.0, 0.0]]),
+            np.asarray([[-1.0, 0.0, 0.0]]),
+            region_ids=(region_id,),
+            target_ids=((),),
+            zero_plane_anchor_world=np.asarray([0.0, -1.0, 0.0]),
+        )
+    }
+
+    samples = generate_square_samples(surfaces, SquareConfig())
+
+    assert len(samples) == 6175
+    assert {sample.yaw_policy for sample in samples} == {"liver_region_two"}
+    assert min(sample.yaw_degrees for sample in samples) == -60.0
+    assert max(sample.yaw_degrees for sample in samples) == 60.0
+
+
 def test_exact_duplicate_pose_keeps_base_region_and_records_supplement_source():
     anchor = np.asarray([0.0, -1.0, 0.0])
     surfaces = {
@@ -128,7 +210,7 @@ def test_exact_duplicate_pose_keeps_base_region_and_records_supplement_source():
         "liver": SurfaceSamples(
             np.asarray([[0.0, 0.0, 0.0]]),
             np.asarray([[-1.0, 0.0, 0.0]]),
-            region_ids=("liver_supplement",),
+            region_ids=("liver_region_one",),
             target_ids=((),),
             zero_plane_anchor_world=anchor,
         ),
@@ -138,7 +220,15 @@ def test_exact_duplicate_pose_keeps_base_region_and_records_supplement_source():
 
     assert len(samples) == 3211
     assert {sample.organ for sample in samples} == {"stomach"}
-    assert {sample.duplicate_source_regions for sample in samples} == {("liver_supplement",)}
+    assert {sample.duplicate_source_regions for sample in samples} == {("liver_region_one",)}
+    assert {
+        sample.duplicate_source_pose_ids for sample in samples
+    } == {
+        (
+            sample.sample_id.replace("stomach", "liver", 1),
+        )
+        for sample in samples
+    }
     assert len({sample.sample_id for sample in samples}) == 3211
     assert all("-r" in sample.sample_id and "-p" in sample.sample_id and "-y" in sample.sample_id for sample in samples)
 
@@ -159,6 +249,78 @@ def test_candidate_pose_count_is_derived_from_roll_pitch_and_yaw_arrays(monkeypa
     assert _candidate_pose_count(surfaces) == 3 * 2 * 13
 
 
+def test_pose_planning_does_not_retain_every_candidate_id(monkeypatch):
+    class TrackedId:
+        live = 0
+        peak = 0
+
+        def __init__(self, value):
+            self.value = value
+            type(self).live += 1
+            type(self).peak = max(type(self).peak, type(self).live)
+
+        def __del__(self):
+            type(self).live -= 1
+
+    def candidates(*_args):
+        for index in range(100):
+            yield SquareSample(
+                sample_id=TrackedId(index),
+                organ="stomach",
+                probe_point_world=np.zeros(3),
+                input_normal_world=np.asarray([1.0, 0.0, 0.0]),
+                vertices=np.full((4, 3), float(index)),
+                source_region="stomach",
+            )
+
+    monkeypatch.setattr(sampling_pipeline_module, "_candidate_pose_count", lambda *_: 100)
+    monkeypatch.setattr(sampling_pipeline_module, "_iter_pose_candidates", candidates)
+
+    generate_square_samples({}, SquareConfig())
+
+    assert TrackedId.peak < 10
+
+
+def test_sampling_point_plan_records_geometry_policy_and_contract_pose_count():
+    surfaces = {
+        "liver": SurfaceSamples(
+            np.asarray([[0.0, 0.0, 0.0]]),
+            np.asarray([[-1.0, 0.0, 0.0]]),
+            region_ids=("liver_region_two",),
+            target_ids=((),),
+            zero_plane_anchor_world=np.asarray([0.0, -1.0, 0.0]),
+        )
+    }
+
+    plan = build_sampling_point_plan(surfaces)
+
+    assert plan == {
+        "schema_version": "sampling-point-plan/v1",
+        "organs": {
+            "stomach": [],
+            "liver": [
+                {
+                    "point_index": 0,
+                    "probe_point_world": [0.0, 0.0, 0.0],
+                    "input_normal_world": [-1.0, 0.0, 0.0],
+                    "source_region": "liver_region_two",
+                    "yaw_policy": "liver_region_two",
+                    "target_ids": [],
+                    "base_local_axes_world": {
+                        "x": [1.0, 0.0, 0.0],
+                        "y": [0.0, 1.0, 0.0],
+                        "z": [0.0, 0.0, 1.0],
+                    },
+                    "candidate_pose_count": 6175,
+                }
+            ],
+            "pancreas": [],
+            "duodenum": [],
+            "esophagus": [],
+        },
+    }
+
+
 def test_pose_deduplication_does_not_merge_through_a_tolerance_chain():
     samples = [
         SquareSample(
@@ -176,6 +338,34 @@ def test_pose_deduplication_does_not_merge_through_a_tolerance_chain():
 
     assert [sample.sample_id for sample in retained] == ["stomach-0", "stomach-2"]
     assert retained[0].duplicate_source_regions == ("source-1",)
+    assert retained[0].duplicate_source_pose_ids == ("stomach-1",)
+
+
+def test_pose_deduplication_records_duplicate_sources_in_protocol_order(monkeypatch):
+    class ReversedPairTree:
+        def __init__(self, _values):
+            pass
+
+        def query_pairs(self, **_kwargs):
+            return np.asarray([[0, 2], [0, 1]], dtype=np.int64)
+
+    monkeypatch.setattr(sampling_pipeline_module, "cKDTree", ReversedPairTree)
+    samples = [
+        SquareSample(
+            sample_id=f"stomach-{index}",
+            organ="stomach",
+            probe_point_world=np.zeros(3),
+            input_normal_world=np.asarray([1.0, 0.0, 0.0]),
+            vertices=np.zeros((4, 3)),
+            source_region=f"source-{index}",
+        )
+        for index in range(3)
+    ]
+
+    retained = _deduplicate_exact_poses(samples)
+
+    assert retained[0].duplicate_source_pose_ids == ("stomach-1", "stomach-2")
+    assert retained[0].duplicate_source_regions == ("source-1", "source-2")
 
 
 def test_degenerate_ordinary_frame_candidate_is_removed_before_fps():
@@ -260,6 +450,7 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypat
             "duodenum_part2": 1,
             "esophagus": 1,
         },
+        minimum_spacing_mm=0.1,
         duodenum_centerline_endpoint_hints_ras_mm=(
             (19.0, 24.0, 700.0),
             (-33.0, 1.0, 664.0),
@@ -274,12 +465,22 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypat
     )
     captured = {}
     ray_origins: list[np.ndarray] = []
+    mesh_load_modes: dict[str, list[bool]] = {}
 
     def record_centerline(*_args, **kwargs):
         captured.update(kwargs)
         return centerline
 
+    original_load = sampling_pipeline_module.load_surface_mesh
+
+    def record_mesh_load(path, **kwargs):
+        mesh_load_modes.setdefault(path.stem, []).append(
+            bool(kwargs.get("main_outer_surface_only", False))
+        )
+        return original_load(path, **kwargs)
+
     monkeypatch.setattr("ct_vascular_resampling.sampling_pipeline.extract_duodenum_centerline", record_centerline)
+    monkeypatch.setattr(sampling_pipeline_module, "load_surface_mesh", record_mesh_load)
     original_filter = sampling_pipeline_module.filter_points_by_target_rays
 
     def record_ray_origins(points, *args, **kwargs):
@@ -292,11 +493,14 @@ def test_full_organ_mesh_directory_runs_all_five_source_sampling_rules(monkeypat
 
     assert set(samples) == {"stomach", "liver", "pancreas", "duodenum", "esophagus"}
     assert all(len(value.points) == len(value.normals) and len(value.points) > 0 for value in samples.values())
-    assert samples["stomach"].sampling_statistics["stomach"].minimum_spacing_mm == 10.0
+    assert samples["stomach"].sampling_statistics["stomach"].minimum_spacing_mm == 0.1
     assert set(samples["duodenum"].sampling_statistics) == {"duodenum_bulb", "duodenum_remainder"}
     assert captured["endpoint_hints_ras_mm"] == settings.duodenum_centerline_endpoint_hints_ras_mm
     assert captured["endpoint_match_tolerance_mm"] == 1.0
     assert len(ray_origins) == 4
+    for organ in sampling_pipeline_module.ORGAN_ORDER:
+        assert mesh_load_modes[organ] == [False, True]
+    assert mesh_load_modes["spleen"] == [False]
     assert np.array_equal(ray_origins[-2][:, :2], ray_origins[-1][:, :2])
     assert np.all(ray_origins[-2][:, 2] > ray_origins[-1][:, 2])
     for organ in ("stomach", "duodenum", "esophagus"):
